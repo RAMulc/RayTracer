@@ -1,0 +1,1093 @@
+<!DOCTYPE html>
+<!-- saved from url=(0059)http://www.raytracerchallenge.com/bonus/bounding-boxes.html -->
+<html lang="en"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    <!-- Global site tag (gtag.js) - Google Analytics -->
+    <script type="text/javascript" async="" src="./Bounding boxes_files/analytics.js.download"></script><script async="" src="./Bounding boxes_files/js"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+
+      gtag('config', 'UA-718320-11');
+    </script>
+
+    
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Bounding boxes</title>
+    <link rel="stylesheet" href="./Bounding boxes_files/chapter.css">
+    <script type="text/javascript" src="./Bounding boxes_files/chapter.js.download"></script>
+  </head>
+  <body>
+    <div class="container">
+      <div class="banner"><img src="./Bounding boxes_files/bounding-boxes.jpg" width="1200" height="480"></div>
+<h1>Bounding boxes and hierarchies</h1><div class="intro">
+  <p>
+    This is an online bonus chapter for
+    <a href="http://www.raytracerchallenge.com/" target="_blank">The Ray Tracer Challenge</a>,
+    by Jamis Buck. To be successful, you:
+  </p>
+
+  <ul>
+    <li><p>should have an account at the <a href="http://forum.raytracerchallenge.com/">Ray Tracer Challenge forum</a>. Ask all your questions there, and see how others have managed!</p></li>
+    
+      <li><p>must have a copy of <a href="http://www.raytracerchallenge.com/">The Ray Tracer Challenge</a>.</p>
+</li>
+    
+      <li><p>must have implemented your ray tracer through chapter 14 (Groups).</p>
+</li>
+    
+  </ul>
+
+  <p>
+    If you don't have a copy of the book,
+    <a href="http://www.raytracerchallenge.com/#purchase" target="_blank">grab one today</a>
+    and start writing a 3D renderer of your own!
+  </p>
+</div>
+
+<p>Your ray tracer probably performs great with the simpler of your test scenes. A plane or two, a handful of spheres, perhaps even a cube or cylinder thrown in for variety—these aren't going to tax your computer terribly. But as soon as your scene grows much bigger than that—and especially if it gets into the hundreds or thousands of elements—you'll find that your renderer begins to bog down, and render times start to drag on into the realm of hours, or even days.</p>
+
+<p>Why? It's because your renderer has to iterate over every object in your scene for each ray it casts, and you'll probably have at least two such rays for each pixel in your image—one for the initial ray, and one for the shadow ray at the point of intersection. Thus, the more objects you have in your scene, the more objects have to be tested for every pixel you render.</p>
+
+<p>Well, then. If you want your renderer to go faster, it becomes a matter of reducing the number of objects that have to be examined at each pixel. Right? The question now is: just how are you supposed to do that?</p>
+
+<p>In this bonus chapter, you'll learn how to optimize large scenes by using <em>bounding boxes</em> and <em>bounding volume hierarchies</em>. By the end, you should see significant improvements when rendering scenes with large numbers of objects, like triangle meshes.</p>
+
+<p>Here we go!</p>
+<h2>Bounding boxes</h2>
+<p>Imagine a scene containing a 3D grid of spheres, with 10 spheres on a side.</p>
+
+<p><img src="./Bounding boxes_files/sphere-grid.jpg" class="medium pop" width="600" height="600"></p>
+
+<p>That's, like, a thousand spheres, right? And the way your ray tracer is currently implemented, every ray you cast is going to have to be tested against every single one of those spheres, which means you can expect your render to take roughly...<em>let's see...multiply...carry the one</em>... Um. Let's just call it an eternity.</p>
+
+<p>BUT.</p>
+
+<p>What if you were to put all of those spheres inside a big, invisible box? And then, what if you reworked your ray tracer so that it only tried to intersect the shapes if a ray happened to intersect the box that contained them?</p>
+
+<p><img src="./Bounding boxes_files/sphere-grid-bbox.jpg" class="medium pop" width="600" height="600"></p>
+
+<p>This is what is called a <em>bounding box</em>. Technically, you could use a sphere instead, or a cylinder, or really any other shape, in which case you would talk about <em>bounding volumes</em> instead of bounding boxes. The goal is to pick a relatively simple shape that forms the tightest possible bound on its contents. Boxes (and especially the axis-aligned bounding boxes from chapter 12) work well as a general solution for this, because they are simple to construct and inexpensive to intersect.</p>
+
+<p>So, that's what you're going to build here. The process will look something like this:</p>
+
+<ol>
+<li>Implement a <code>BoundingBox</code> structure and some associated logic to manipulate it.</li>
+<li>Add a function to each primitive shape for querying the shape's bounds (in object space).</li>
+<li>Implement a function for recursively finding the bounds of a <code>Group</code> object.</li>
+<li>Implement a function for recursively finding the bounds of a <code>CSG</code> object.</li>
+<li>Detect if a ray intersects a bounding box.</li>
+<li>Add a guard to the <code>local_intersect()</code> function of your aggregate shapes (<code>Group</code> and <code>CSG</code>).</li>
+</ol>
+
+<p>Once you've nailed <em>that</em> down, you'll move on to the second half of this optimization: <em>bounding volume hierarchies</em>, but let's not get ahead of ourselves. First things first: <em>bounding boxes</em>. Onward!</p>
+<h3>The BoundingBox structure</h3>
+<p>A <code>BoundingBox</code> is a simple structure describing an axis-aligned bounding box, or AABB. It contains just two points, one identifying the <em>minimum</em> point on the box, and the other identifying the <em>maximum</em> point. The minimum point is where the <code>x</code>, <code>y</code>, and <code>z</code> coordinates are all smallest, and the maximum point is where those coordinates are all largest.</p>
+
+<p><img src="./Bounding boxes_files/bbox-min-max.png" class="small" width="482" height="444"></p>
+
+<p>Initially, though, the box will be empty, which means its <code>min</code> and <code>max</code> points are a bit wonky by default. The following test demonstrates this:</p>
+
+<pre class="code feature "><div class="pre-title">bounds.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> Creating an empty bounding box</span>
+  <span class="k">Given</span> box <span class="p">←</span> <span class="nv">bounding_box</span><span class="o">(</span>empty<span class="p">)</span>
+  <span class="k">Then</span> box<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span>infinity, infinity, infinity<span class="p">)</span>
+    <span class="k">And</span> box<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span>infinity, <span class="p">-</span>infinity, <span class="p">-</span>infinity<span class="p">)</span>
+</div></pre>
+
+<p><em>What?</em> Yeah, like I said, wonky. An empty bounding box has it's <em>smallest</em> point at <em>positive</em> infinity, and it's <em>largest</em> point at <em>negative</em> infinity. Basically, what this is saying is that the empty box is <em>invalid</em>. It contains no space whatsoever.</p>
+
+<div class="aside note"><p>You may be wondering, "why bother with an empty bounding box at all?" It <em>does</em> seem pretty pointless, but hang in there. When you start dealing with adding points to these boxes, or combining multiple boxes together, having your empty boxes start out "wonky" actually makes things easier.</p>
+</div>
+
+<p>To describe a bounding box that encapsulates some volume, you instantiate the box with explicit minimum and maximum points, like this:</p>
+
+<pre class="code feature "><div class="pre-title">bounds.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> Creating a bounding box with volume</span>
+  <span class="k">Given</span> box <span class="p">←</span> <span class="nv">bounding_box</span><span class="o">(</span>min<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">2</span>, <span class="p">-</span><span class="mi">3</span><span class="p">)</span> max<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="mi">3</span>, <span class="mi">2</span>, <span class="mi">1</span><span class="p">))</span>
+  <span class="k">Then</span> box<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">2</span>, <span class="p">-</span><span class="mi">3</span><span class="p">)</span>
+    <span class="k">And</span> box<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mi">3</span>, <span class="mi">2</span>, <span class="mi">1</span><span class="p">)</span>
+</div></pre>
+
+<p>Later in this chapter you'll define several operations on these bounding boxes, but for now, you'll add just one: the ability to resize a bounding box so that it includes a given point. It looks like this:</p>
+
+<pre class="code feature "><div class="pre-title">bounds.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> Adding points to an empty bounding box</span>
+  <span class="k">Given</span> box <span class="p">←</span> <span class="nv">bounding_box</span><span class="o">(</span>empty<span class="p">)</span>
+    <span class="k">And</span> p1 <span class="p">←</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">5</span>, <span class="mi">2</span>, <span class="mi">0</span><span class="p">)</span>
+    <span class="k">And</span> p2 <span class="p">←</span> <span class="nv">point</span><span class="o">(</span><span class="mi">7</span>, <span class="mi">0</span>, <span class="p">-</span><span class="mi">3</span><span class="p">)</span>
+  <span class="k">When</span> p1 is added to box
+    <span class="k">And</span> p2 is added to box
+  <span class="k">Then</span> box<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">5</span>, <span class="mi">0</span>, <span class="p">-</span><span class="mi">3</span><span class="p">)</span>
+    <span class="k">And</span> box<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mi">7</span>, <span class="mi">2</span>, <span class="mi">0</span><span class="p">)</span>
+</div></pre>
+
+<p>Every time you add a point to a bounding box, the box adjusts its <code>min</code> and <code>max</code> points, resizing itself so that it can contain the given point. It does this by checking the <code>x</code>, <code>y</code>, and <code>z</code> components against the <code>x</code>, <code>y</code>, and <code>z</code> components of the <code>min</code> and <code>max</code> points. If any component is less than the corresponding component of <code>min</code>, that component of <code>min</code> is replaced with the new value. Similarly, if any component is greater than the corresponding component of <code>max</code>, <em>that</em> component gets replaced. Here's some pseudocode:</p>
+<pre class="code pseudo "><div class="pre-content"><span class="c1"># adding "point" to "box"
+</span>
+<span class="n">box</span><span class="o">.</span><span class="n">min</span><span class="o">.</span><span class="n">x</span> <span class="o">←</span> <span class="n">point</span><span class="o">.</span><span class="n">x</span> <span class="k">if</span> <span class="n">point</span><span class="o">.</span><span class="n">x</span> <span class="o">&lt;</span> <span class="n">box</span><span class="o">.</span><span class="n">min</span><span class="o">.</span><span class="n">x</span>
+<span class="n">box</span><span class="o">.</span><span class="n">min</span><span class="o">.</span><span class="n">y</span> <span class="o">←</span> <span class="n">point</span><span class="o">.</span><span class="n">y</span> <span class="k">if</span> <span class="n">point</span><span class="o">.</span><span class="n">y</span> <span class="o">&lt;</span> <span class="n">box</span><span class="o">.</span><span class="n">min</span><span class="o">.</span><span class="n">y</span>
+<span class="n">box</span><span class="o">.</span><span class="n">min</span><span class="o">.</span><span class="n">z</span> <span class="o">←</span> <span class="n">point</span><span class="o">.</span><span class="n">z</span> <span class="k">if</span> <span class="n">point</span><span class="o">.</span><span class="n">z</span> <span class="o">&lt;</span> <span class="n">box</span><span class="o">.</span><span class="n">min</span><span class="o">.</span><span class="n">z</span>
+
+<span class="n">box</span><span class="o">.</span><span class="n">max</span><span class="o">.</span><span class="n">x</span> <span class="o">←</span> <span class="n">point</span><span class="o">.</span><span class="n">x</span> <span class="k">if</span> <span class="n">point</span><span class="o">.</span><span class="n">x</span> <span class="o">&gt;</span> <span class="n">box</span><span class="o">.</span><span class="n">max</span><span class="o">.</span><span class="n">x</span>
+<span class="n">box</span><span class="o">.</span><span class="n">max</span><span class="o">.</span><span class="n">y</span> <span class="o">←</span> <span class="n">point</span><span class="o">.</span><span class="n">y</span> <span class="k">if</span> <span class="n">point</span><span class="o">.</span><span class="n">y</span> <span class="o">&gt;</span> <span class="n">box</span><span class="o">.</span><span class="n">max</span><span class="o">.</span><span class="n">y</span>
+<span class="n">box</span><span class="o">.</span><span class="n">max</span><span class="o">.</span><span class="n">z</span> <span class="o">←</span> <span class="n">point</span><span class="o">.</span><span class="n">z</span> <span class="k">if</span> <span class="n">point</span><span class="o">.</span><span class="n">z</span> <span class="o">&gt;</span> <span class="n">box</span><span class="o">.</span><span class="n">max</span><span class="o">.</span><span class="n">z</span>
+</div></pre>
+<p>With that implementation in mind, recall how your empty box was defined: <code>min</code> was positive infinity, and <code>max</code> was negative infinity. This means that any point you try to add to that empty box it will be <em>smaller</em> than <code>min</code>, and <em>larger</em> than <code>max</code>, allowing the pseudocode above to automatically snap your box to the given point. See? Wonky is wonderful!</p>
+
+<p>Once you have that much defined, you can begin describing the bounds for each of the primitive shapes in your ray tracer.</p>
+<h3>Bounds for primitives</h3>
+<p>By the time you reach chapter 14, "Groups", of <a href="http://www.raytracerchallenge.com/">The Ray Tracer Challenge</a>, your ray tracer ought to include the following primitives:</p>
+
+<ul>
+<li>spheres</li>
+<li>planes</li>
+<li>cubes</li>
+<li>cylinders</li>
+<li>cones</li>
+</ul>
+
+<p>In this section, you'll define bounds for each of those primitive types, as well as triangles. (If you haven't yet reached chapter 15, "Triangles", you can skip that part and come back to it when you're ready.)</p>
+
+<p>For each of these primitive shapes, you'll define a function called <code>bounds_of(shape)</code>, which returns a bounding box in <em>object space</em>. This means that, for now, you won't need to worry about any transformations on the objects.</p>
+<h4>Spheres</h4>
+<p>The spheres in your ray tracer are always at the origin, and have a radius of 1. This means that the corresponding bounding boxes will also be centered at the origin, and extend from -1 to 1 along each axis.</p>
+
+<pre class="code feature "><div class="pre-title">spheres.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> A sphere has a bounding box</span>
+  <span class="k">Given</span> shape <span class="p">←</span> <span class="nv">sphere</span><span class="o">(</span><span class="p">)</span>
+  <span class="k">When</span> box <span class="p">←</span> <span class="nv">bounds_of</span><span class="o">(</span>shape<span class="p">)</span>
+  <span class="k">Then</span> box<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">1</span><span class="p">)</span>
+    <span class="k">And</span> box<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mi">1</span>, <span class="mi">1</span>, <span class="mi">1</span><span class="p">)</span>
+</div></pre>
+<h4>Planes</h4>
+<p>Planes are trickier, because they stretch to infinity in <code>x</code> and <code>z</code>, and have zero thickness in <code>y</code>.</p>
+
+<pre class="code feature "><div class="pre-title">planes.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> A plane has a bounding box</span>
+  <span class="k">Given</span> shape <span class="p">←</span> <span class="nv">plane</span><span class="o">(</span><span class="p">)</span>
+  <span class="k">When</span> box <span class="p">←</span> <span class="nv">bounds_of</span><span class="o">(</span>shape<span class="p">)</span>
+  <span class="k">Then</span> box<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span>infinity, <span class="mi">0</span>, <span class="p">-</span>infinity<span class="p">)</span>
+    <span class="k">And</span> box<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span>infinity, <span class="mi">0</span>, infinity<span class="p">)</span>
+</div></pre>
+
+<p>Any bounds you wrap around a plane are effectively useless, because even the tiniest rotation will cause it's bounding box to suddenly stretch to infinity along every axis. Still, having a bounding box defined for it helps avoid special cases, so it's worth doing.</p>
+<h4>Cubes</h4>
+<p>Cubes are great, because they can be perfectly bound by their bounding box. There is literally no other shape that bounds a cube more effectively than another cube of the same shape and size.</p>
+
+<pre class="code feature "><div class="pre-title">cubes.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> A cube has a bounding box</span>
+  <span class="k">Given</span> shape <span class="p">←</span> <span class="nv">cube</span><span class="o">(</span><span class="p">)</span>
+  <span class="k">When</span> box <span class="p">←</span> <span class="nv">bounds_of</span><span class="o">(</span>shape<span class="p">)</span>
+  <span class="k">Then</span> box<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">1</span><span class="p">)</span>
+    <span class="k">And</span> box<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mi">1</span>, <span class="mi">1</span>, <span class="mi">1</span><span class="p">)</span>
+</div></pre>
+
+<p>Neat, huh?</p>
+<h4>Cylinders</h4>
+<p>Like planes, an infinite cylinder (or cone) is kind of worthless when it comes to trying to bound it, because any rotation will cause it to expand to infinity. For completeness, though, it's worth defining anyway.</p>
+
+<p>In object space, the cylinder extends from -1 to 1 in both <code>x</code> and <code>z</code>, and from <code>-infinity</code> to <code>infinity</code> in <code>y</code>:</p>
+
+<pre class="code feature "><div class="pre-title">cylinders.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> An unbounded cylinder has a bounding box</span>
+  <span class="k">Given</span> shape <span class="p">←</span> <span class="nv">cylinder</span><span class="o">(</span><span class="p">)</span>
+  <span class="k">When</span> box <span class="p">←</span> <span class="nv">bounds_of</span><span class="o">(</span>shape<span class="p">)</span>
+  <span class="k">Then</span> box<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="p">-</span>infinity, <span class="p">-</span><span class="mi">1</span><span class="p">)</span>
+    <span class="k">And</span> box<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mi">1</span>, infinity, <span class="mi">1</span><span class="p">)</span>
+</div></pre>
+
+<p>Once you limit the cylinder (and especially if you limit it at both ends), it becomes much easier to bound:</p>
+
+<pre class="code feature "><div class="pre-title">cylinders.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> A bounded cylinder has a bounding box</span>
+  <span class="k">Given</span> shape <span class="p">←</span> <span class="nv">cylinder</span><span class="o">(</span><span class="p">)</span>
+    <span class="k">And</span> shape<span class="p">.</span>minimum <span class="p">←</span> <span class="p">-</span><span class="mi">5</span>
+    <span class="k">And</span> shape<span class="p">.</span>maximum <span class="p">←</span> <span class="mi">3</span>
+  <span class="k">When</span> box <span class="p">←</span> <span class="nv">bounds_of</span><span class="o">(</span>shape<span class="p">)</span>
+  <span class="k">Then</span> box<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">5</span>, <span class="p">-</span><span class="mi">1</span><span class="p">)</span>
+    <span class="k">And</span> box<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mi">1</span>, <span class="mi">3</span>, <span class="mi">1</span><span class="p">)</span>
+</div></pre>
+<h4>Cones</h4>
+<p>Bounding boxes around infinite cones are perhaps the most useless of all, because cones extends to infinity along every axis.</p>
+
+<pre class="code feature "><div class="pre-title">cones.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> An unbounded cone has a bounding box</span>
+  <span class="k">Given</span> shape <span class="p">←</span> <span class="nv">cone</span><span class="o">(</span><span class="p">)</span>
+  <span class="k">When</span> box <span class="p">←</span> <span class="nv">bounds_of</span><span class="o">(</span>shape<span class="p">)</span>
+  <span class="k">Then</span> box<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span>infinity, <span class="p">-</span>infinity, <span class="p">-</span>infinity<span class="p">)</span>
+    <span class="k">And</span> box<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span>infinity, infinity, infinity<span class="p">)</span>
+</div></pre>
+
+<p>Limiting the cones makes them easier to bound, though the logic is more complicated than you might think at first glance.</p>
+
+<pre class="code feature "><div class="pre-title">cones.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> A bounded cone has a bounding box</span>
+  <span class="k">Given</span> shape <span class="p">←</span> <span class="nv">cone</span><span class="o">(</span><span class="p">)</span>
+    <span class="k">And</span> shape<span class="p">.</span>minimum <span class="p">←</span> <span class="p">-</span><span class="mi">5</span>
+    <span class="k">And</span> shape<span class="p">.</span>maximum <span class="p">←</span> <span class="mi">3</span>
+  <span class="k">When</span> box <span class="p">←</span> <span class="nv">bounds_of</span><span class="o">(</span>shape<span class="p">)</span>
+  <span class="k">Then</span> box<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">5</span>, <span class="p">-</span><span class="mi">5</span>, <span class="p">-</span><span class="mi">5</span><span class="p">)</span>
+    <span class="k">And</span> box<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mi">5</span>, <span class="mi">3</span>, <span class="mi">5</span><span class="p">)</span>
+</div></pre>
+
+<p>To find the bounds of a limited cone, choose the largest of the absolute values of <code>cone.minimum</code> and <code>cone.maximum</code>. Call it <code>limit</code>. The cone's bounding box then goes from <code>-limit</code> to <code>limit</code> in both <code>x</code> and <code>z</code>, and from <code>cone.minimum</code> to <code>cone.maximum</code> in <code>y</code>.</p>
+
+<p>In pseudocode:</p>
+<pre class="code pseudo "><div class="pre-content"><span class="k">function</span> <span class="nv">bounds_of</span><span class="o">(</span><span class="n">cone</span><span class="o">)</span>
+  <span class="k">let</span> <span class="n">a</span> <span class="o">←</span> <span class="nv">abs</span><span class="o">(</span><span class="n">cone</span><span class="o">.</span><span class="n">minimum</span><span class="o">)</span>
+  <span class="k">let</span> <span class="n">b</span> <span class="o">←</span> <span class="nv">abs</span><span class="o">(</span><span class="n">cone</span><span class="o">.</span><span class="n">maximum</span><span class="o">)</span>
+  <span class="k">let</span> <span class="n">limit</span> <span class="o">←</span> <span class="nv">max</span><span class="o">(</span><span class="n">a</span><span class="o">,</span> <span class="n">b</span><span class="o">)</span>
+
+  <span class="k">return</span> <span class="nv">bounding_box</span><span class="o">(</span><span class="n">min</span><span class="o">=</span><span class="nv">point</span><span class="o">(-</span><span class="n">limit</span><span class="o">,</span> <span class="n">cone</span><span class="o">.</span><span class="n">minimum</span><span class="o">,</span> <span class="o">-</span><span class="n">limit</span><span class="o">)</span>
+                      <span class="n">max</span><span class="o">=</span><span class="nv">point</span><span class="o">(</span><span class="n">limit</span><span class="o">,</span> <span class="n">cone</span><span class="o">.</span><span class="n">maximum</span><span class="o">,</span> <span class="n">limit</span><span class="o">))</span>  
+<span class="k">end</span> <span class="k">function</span>
+</div></pre><h4>Triangles</h4>
+<p>Finding the bounding box for a triangle is a matter of finding the smallest and largest <code>x</code>, <code>y</code>, and <code>z</code> components from its three points.</p>
+
+<pre class="code feature "><div class="pre-title">triangles.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> A triangle has a bounding box</span>
+  <span class="k">Given</span> p1 <span class="p">←</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">3</span>, <span class="mi">7</span>, <span class="mi">2</span><span class="p">)</span>
+    <span class="k">And</span> p2 <span class="p">←</span> <span class="nv">point</span><span class="o">(</span><span class="mi">6</span>, <span class="mi">2</span>, <span class="p">-</span><span class="mi">4</span><span class="p">)</span>
+    <span class="k">And</span> p3 <span class="p">←</span> <span class="nv">point</span><span class="o">(</span><span class="mi">2</span>, <span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">1</span><span class="p">)</span>
+    <span class="k">And</span> shape <span class="p">←</span> <span class="nv">triangle</span><span class="o">(</span>p1, p2, p3<span class="p">)</span>
+  <span class="k">When</span> box <span class="p">←</span> <span class="nv">bounds_of</span><span class="o">(</span>shape<span class="p">)</span>
+  <span class="k">Then</span> box<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">3</span>, <span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">4</span><span class="p">)</span>
+    <span class="k">And</span> box<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mi">6</span>, <span class="mi">7</span>, <span class="mi">2</span><span class="p">)</span>
+</div></pre>
+
+<p>The (conceptually) simplest way to implement this is to just declare an empty bounding box, and then add each of the triangle's points to it:</p>
+<pre class="code pseudo "><div class="pre-content"><span class="k">function</span> <span class="nv">bounds_of</span><span class="o">(</span><span class="n">triangle</span><span class="o">)</span>
+  <span class="k">let</span> <span class="n">box</span> <span class="o">←</span> <span class="nv">bounding_box</span><span class="o">(</span><span class="n">empty</span><span class="o">)</span>
+
+  <span class="n">add</span> <span class="n">triangle</span><span class="o">.</span><span class="n">p1</span> <span class="n">to</span> <span class="n">box</span>
+  <span class="n">add</span> <span class="n">triangle</span><span class="o">.</span><span class="n">p2</span> <span class="n">to</span> <span class="n">box</span>
+  <span class="n">add</span> <span class="n">triangle</span><span class="o">.</span><span class="n">p3</span> <span class="n">to</span> <span class="n">box</span>
+
+  <span class="k">return</span> <span class="n">box</span>
+<span class="k">end</span> <span class="k">function</span>
+</div></pre>
+<p>And there you have it!</p>
+<h4>The Test Shape</h4>
+<p>Lastly, it may seem odd to put bounds on an abstract shape that you only use in tests, but it'll be useful for some of the tests later in this chapter. For the sake of <code>test_shape()</code>, assume its bounds extend from -1 to 1 on each axis.</p>
+
+<pre class="code feature "><div class="pre-title">shapes.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> Test shape has (arbitrary) bounds</span>
+  <span class="k">Given</span> shape <span class="p">←</span> <span class="nv">test_shape</span><span class="o">(</span><span class="p">)</span>
+  <span class="k">When</span> box <span class="p">←</span> <span class="nv">bounds_of</span><span class="o">(</span>shape<span class="p">)</span>
+  <span class="k">Then</span> box<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">1</span><span class="p">)</span>
+    <span class="k">And</span> box<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mi">1</span>, <span class="mi">1</span>, <span class="mi">1</span><span class="p">)</span>
+</div></pre>
+
+<p>There's really no reason for those particular bounds. They're arbitrary, but they're also predictable and easy to work with.</p>
+<h3>More bounding box operations</h3>
+<p>Before you can add bounding boxes to groups and CSG objects, you're going to need to add a few more operations to your bounding boxes. Specifically, you need to be able to merge two bounding boxes, check to see if a box contains a given point, and check to see if a box contains another bounding box.</p>
+
+<p>Let's start with merging one bounding box into another. This works very much like adding a point did, where the first box is resized sufficiently to contain the new box. Here's a test:</p>
+
+<pre class="code feature "><div class="pre-title">bounds.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> Adding one bounding box to another</span>
+  <span class="k">Given</span> box1 <span class="p">←</span> <span class="nv">bounding_box</span><span class="o">(</span>min<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">5</span>, <span class="p">-</span><span class="mi">2</span>, <span class="mi">0</span><span class="p">)</span> max<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="mi">7</span>, <span class="mi">4</span>, <span class="mi">4</span><span class="p">))</span>
+    <span class="k">And</span> box2 <span class="p">←</span> <span class="nv">bounding_box</span><span class="o">(</span>min<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="mi">8</span>, <span class="p">-</span><span class="mi">7</span>, <span class="p">-</span><span class="mi">2</span><span class="p">)</span> max<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="mi">14</span>, <span class="mi">2</span>, <span class="mi">8</span><span class="p">))</span>
+  <span class="k">When</span> box2 is added to box1
+  <span class="k">Then</span> box1<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">5</span>, <span class="p">-</span><span class="mi">7</span>, <span class="p">-</span><span class="mi">2</span><span class="p">)</span>
+    <span class="k">And</span> box1<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mi">14</span>, <span class="mi">4</span>, <span class="mi">8</span><span class="p">)</span>
+</div></pre>
+
+<p>Make this pass by adding the <code>min</code> and <code>max</code> points from one box to the other, causing the box to resize until it contains both points. In pseudocode:</p>
+<pre class="code pseudo "><div class="pre-content"><span class="c1"># adding "box2" to "box1"
+</span>
+<span class="n">add</span> <span class="n">box2</span><span class="o">.</span><span class="n">min</span> <span class="n">to</span> <span class="n">box1</span>
+<span class="n">add</span> <span class="n">box2</span><span class="o">.</span><span class="n">max</span> <span class="n">to</span> <span class="n">box1</span>
+</div></pre>
+<p>Next, you'll implement the ability to check whether a box contains a given point, like this:</p>
+
+<pre class="code feature "><div class="pre-title">bounds.feature</div><div class="pre-content"><span class="k">Scenario Outline</span><span class="p">:</span><span class="s2"> Checking to see if a box contains a given point</span>
+  <span class="k">Given</span> box <span class="p">←</span> <span class="nv">bounding_box</span><span class="o">(</span>min<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="mi">5</span>, <span class="p">-</span><span class="mi">2</span>, <span class="mi">0</span><span class="p">)</span> max<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="mi">11</span>, <span class="mi">4</span>, <span class="mi">7</span><span class="p">))</span>
+    <span class="k">And</span> p <span class="p">←</span> <span class="nv">&lt;point&gt;</span>
+  <span class="k">Then</span> <span class="nv">box_contains_point</span><span class="o">(</span>box, p<span class="p">)</span> is <span class="nv">&lt;result&gt;</span>
+
+  <span class="k">Examples</span><span class="p">:</span>
+    <span class="p">|</span> point           <span class="p">|</span> result <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">5</span>, <span class="p">-</span><span class="mi">2</span>, <span class="mi">0</span><span class="p">)</span> <span class="p">|</span> true   <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">11</span>, <span class="mi">4</span>, <span class="mi">7</span><span class="p">)</span> <span class="p">|</span> true   <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">8</span>, <span class="mi">1</span>, <span class="mi">3</span><span class="p">)</span>  <span class="p">|</span> true   <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">3</span>, <span class="mi">0</span>, <span class="mi">3</span><span class="p">)</span>  <span class="p">|</span> false  <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">8</span>, <span class="p">-</span><span class="mi">4</span>, <span class="mi">3</span><span class="p">)</span> <span class="p">|</span> false  <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">8</span>, <span class="mi">1</span>, <span class="p">-</span><span class="mi">1</span><span class="p">)</span> <span class="p">|</span> false  <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">13</span>, <span class="mi">1</span>, <span class="mi">3</span><span class="p">)</span> <span class="p">|</span> false  <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">8</span>, <span class="mi">5</span>, <span class="mi">3</span><span class="p">)</span>  <span class="p">|</span> false  <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">8</span>, <span class="mi">1</span>, <span class="mi">8</span><span class="p">)</span>  <span class="p">|</span> false  <span class="p">|</span>
+</div></pre>
+
+<p>A box contains a point if each of the point's components lie between the corresponding <code>min</code> and <code>max</code> components, inclusive, like this:</p>
+<pre class="code pseudo "><div class="pre-content"><span class="k">function</span> <span class="nv">box_contains_point</span><span class="o">(</span><span class="n">box</span><span class="o">,</span> <span class="n">point</span><span class="o">)</span>
+  <span class="k">return</span> <span class="n">point</span><span class="o">.</span><span class="n">x</span> <span class="n">is</span> <span class="n">between</span> <span class="n">box</span><span class="o">.</span><span class="n">min</span><span class="o">.</span><span class="n">x</span> <span class="n">and</span> <span class="n">box</span><span class="o">.</span><span class="n">max</span><span class="o">.</span><span class="n">x</span> <span class="n">and</span>
+         <span class="n">point</span><span class="o">.</span><span class="n">y</span> <span class="n">is</span> <span class="n">between</span> <span class="n">box</span><span class="o">.</span><span class="n">min</span><span class="o">.</span><span class="n">y</span> <span class="n">and</span> <span class="n">box</span><span class="o">.</span><span class="n">max</span><span class="o">.</span><span class="n">y</span> <span class="n">and</span>
+         <span class="n">point</span><span class="o">.</span><span class="n">z</span> <span class="n">is</span> <span class="n">between</span> <span class="n">box</span><span class="o">.</span><span class="n">min</span><span class="o">.</span><span class="n">z</span> <span class="n">and</span> <span class="n">box</span><span class="o">.</span><span class="n">max</span><span class="o">.</span><span class="n">z</span>
+<span class="k">end</span> <span class="k">function</span>
+</div></pre>
+<p>Taking this one step further, you'll also need to check to see whether a box contains another box:</p>
+
+<pre class="code feature "><div class="pre-title">bounds.feature</div><div class="pre-content"><span class="k">Scenario Outline</span><span class="p">:</span><span class="s2"> Checking to see if a box contains a given box</span>
+  <span class="k">Given</span> box <span class="p">←</span> <span class="nv">bounding_box</span><span class="o">(</span>min<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="mi">5</span>, <span class="p">-</span><span class="mi">2</span>, <span class="mi">0</span><span class="p">)</span> max<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="mi">11</span>, <span class="mi">4</span>, <span class="mi">7</span><span class="p">))</span>
+    <span class="k">And</span> box2 <span class="p">←</span> <span class="nv">bounding_box</span><span class="o">(</span>min<span class="p">=</span><span class="nv">&lt;min&gt;</span> max<span class="p">=</span><span class="nv">&lt;max&gt;</span><span class="p">)</span>
+  <span class="k">Then</span> <span class="nv">box_contains_box</span><span class="o">(</span>box, box2<span class="p">)</span> is <span class="nv">&lt;result&gt;</span>
+
+  <span class="k">Examples</span><span class="p">:</span>
+    <span class="p">|</span> min              <span class="p">|</span> max             <span class="p">|</span> result <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">5</span>, <span class="p">-</span><span class="mi">2</span>, <span class="mi">0</span><span class="p">)</span>  <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">11</span>, <span class="mi">4</span>, <span class="mi">7</span><span class="p">)</span> <span class="p">|</span> true   <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">6</span>, <span class="p">-</span><span class="mi">1</span>, <span class="mi">1</span><span class="p">)</span>  <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">10</span>, <span class="mi">3</span>, <span class="mi">6</span><span class="p">)</span> <span class="p">|</span> true   <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">4</span>, <span class="p">-</span><span class="mi">3</span>, <span class="p">-</span><span class="mi">1</span><span class="p">)</span> <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">10</span>, <span class="mi">3</span>, <span class="mi">6</span><span class="p">)</span> <span class="p">|</span> false  <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">6</span>, <span class="p">-</span><span class="mi">1</span>, <span class="mi">1</span><span class="p">)</span>  <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">12</span>, <span class="mi">5</span>, <span class="mi">8</span><span class="p">)</span> <span class="p">|</span> false  <span class="p">|</span>
+</div></pre>
+
+<p>A box lies within another box if both its <code>min</code> and <code>max</code> points lie within that box.</p>
+
+<p>Make those tests all pass. Once you've got those nailed down, there's one more operation to tackle before you can put bounding boxes around groups and CSG objects: <em>transformations</em>.</p>
+<h3>Transforming bounding boxes</h3>
+<p>Remember that the bounds reported by a shape will be in object space. This is just fine, but when finding the bounds of an aggregate shape like a group or a CSG object, you need to convert each child's bounding box from its original object space, to <em>parent space</em>—the object space of the parent group or CSG shape.</p>
+
+<p>Here's a test to start the discussion. It defines a bounding box, and then rotates it around the <code>y</code> and <code>x</code> axes.</p>
+
+<pre class="code feature "><div class="pre-title">bounds.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> Transforming a bounding box</span>
+  <span class="k">Given</span> box <span class="p">←</span> <span class="nv">bounding_box</span><span class="o">(</span>min<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">1</span><span class="p">)</span> max<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="mi">1</span>, <span class="mi">1</span>, <span class="mi">1</span><span class="p">))</span>
+    <span class="k">And</span> matrix <span class="p">←</span> <span class="nv">rotation_x</span><span class="o">(</span><span class="nv">π</span> <span class="p">/</span> <span class="mi">4</span><span class="p">)</span> <span class="p">*</span> <span class="nv">rotation_y</span><span class="o">(</span><span class="nv">π</span> <span class="p">/</span> <span class="mi">4</span><span class="p">)</span>
+  <span class="k">When</span> box2 <span class="p">←</span> <span class="nv">transform</span><span class="o">(</span>box, matrix<span class="p">)</span>
+  <span class="k">Then</span> box2<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mf">1.4142</span>, <span class="p">-</span><span class="mf">1.7071</span>, <span class="p">-</span><span class="mf">1.7071</span><span class="p">)</span>
+    <span class="k">And</span> box2<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mf">1.4142</span>, <span class="mf">1.7071</span>, <span class="mf">1.7071</span><span class="p">)</span>
+</div></pre>
+
+<p>You might think transforming a bounding box is "just" a matter of multiplying the box's <code>min</code> and <code>max</code> points by some transformation matrix...and you'd <em>almost</em> be right, so long as the matrix only translates or scales.</p>
+
+<p>Rotation, though, throws a wrench into the works. To see why, consider the following illustration of a bounding box being rotated 30º around the <code>y</code> axis.</p>
+
+<p><img src="./Bounding boxes_files/bbox-rotate.png" class="medium" width="1108" height="468"></p>
+
+<p>If you construct a new bounding box using only the transformed <code>min</code> and <code>max</code> points, check out what happens:</p>
+
+<p><img src="./Bounding boxes_files/bbox-rotate-bbox.png" class="small" width="547" height="412"></p>
+
+<p>The behavior we <em>expect</em> is that the transformed box ought to be able to contain the volume of the rotated cube, but as you can see, that's not what happens here. It's gone all skinny, and definitely no longer contains all the volume of the original cube. This is because rotating an AABB means it is no longer axis-aligned! A new <em>axis-aligned</em> bounding box needs to be computed for that rotated box.</p>
+
+<p>The right way to do this is to actually transform the points at all eight corners of the cube, and then find a new bounding box that contains all eight transformed points. In pseudocode, it might look something like this:</p>
+<pre class="code pseudo "><div class="pre-content"><span class="k">function</span> <span class="nv">transform</span><span class="o">(</span><span class="n">bbox</span><span class="o">,</span> <span class="n">matrix</span><span class="o">)</span>
+  <span class="k">let</span> <span class="n">p1</span> <span class="o">←</span> <span class="n">bbox</span><span class="o">.</span><span class="n">min</span>
+  <span class="k">let</span> <span class="n">p2</span> <span class="o">←</span> <span class="nv">point</span><span class="o">(</span><span class="n">bbox</span><span class="o">.</span><span class="n">min</span><span class="o">.</span><span class="n">x</span><span class="o">,</span> <span class="n">bbox</span><span class="o">.</span><span class="n">min</span><span class="o">.</span><span class="n">y</span><span class="o">,</span> <span class="n">bbox</span><span class="o">.</span><span class="n">max</span><span class="o">.</span><span class="n">z</span><span class="o">)</span>
+  <span class="k">let</span> <span class="n">p3</span> <span class="o">←</span> <span class="nv">point</span><span class="o">(</span><span class="n">bbox</span><span class="o">.</span><span class="n">min</span><span class="o">.</span><span class="n">x</span><span class="o">,</span> <span class="n">bbox</span><span class="o">.</span><span class="n">max</span><span class="o">.</span><span class="n">y</span><span class="o">,</span> <span class="n">bbox</span><span class="o">.</span><span class="n">min</span><span class="o">.</span><span class="n">z</span><span class="o">)</span>
+  <span class="k">let</span> <span class="n">p4</span> <span class="o">←</span> <span class="nv">point</span><span class="o">(</span><span class="n">bbox</span><span class="o">.</span><span class="n">min</span><span class="o">.</span><span class="n">x</span><span class="o">,</span> <span class="n">bbox</span><span class="o">.</span><span class="n">max</span><span class="o">.</span><span class="n">y</span><span class="o">,</span> <span class="n">bbox</span><span class="o">.</span><span class="n">max</span><span class="o">.</span><span class="n">z</span><span class="o">)</span>
+  <span class="k">let</span> <span class="n">p5</span> <span class="o">←</span> <span class="nv">point</span><span class="o">(</span><span class="n">bbox</span><span class="o">.</span><span class="n">max</span><span class="o">.</span><span class="n">x</span><span class="o">,</span> <span class="n">bbox</span><span class="o">.</span><span class="n">min</span><span class="o">.</span><span class="n">y</span><span class="o">,</span> <span class="n">bbox</span><span class="o">.</span><span class="n">min</span><span class="o">.</span><span class="n">z</span><span class="o">)</span>
+  <span class="k">let</span> <span class="n">p6</span> <span class="o">←</span> <span class="nv">point</span><span class="o">(</span><span class="n">bbox</span><span class="o">.</span><span class="n">max</span><span class="o">.</span><span class="n">x</span><span class="o">,</span> <span class="n">bbox</span><span class="o">.</span><span class="n">min</span><span class="o">.</span><span class="n">y</span><span class="o">,</span> <span class="n">bbox</span><span class="o">.</span><span class="n">max</span><span class="o">.</span><span class="n">z</span><span class="o">)</span>
+  <span class="k">let</span> <span class="n">p7</span> <span class="o">←</span> <span class="nv">point</span><span class="o">(</span><span class="n">bbox</span><span class="o">.</span><span class="n">max</span><span class="o">.</span><span class="n">x</span><span class="o">,</span> <span class="n">bbox</span><span class="o">.</span><span class="n">max</span><span class="o">.</span><span class="n">y</span><span class="o">,</span> <span class="n">bbox</span><span class="o">.</span><span class="n">min</span><span class="o">.</span><span class="n">z</span><span class="o">)</span>
+  <span class="k">let</span> <span class="n">p8</span> <span class="o">←</span> <span class="n">bbox</span><span class="o">.</span><span class="n">max</span>
+
+  <span class="k">let</span> <span class="n">new_bbox</span> <span class="o">←</span> <span class="nv">bounding_box</span><span class="o">(</span><span class="n">empty</span><span class="o">)</span>
+
+  <span class="k">for</span> <span class="n">p</span> <span class="n">in</span> <span class="o">(</span><span class="n">p1</span><span class="o">,</span> <span class="n">p2</span><span class="o">,</span> <span class="n">p3</span><span class="o">,</span> <span class="n">p4</span><span class="o">,</span> <span class="n">p5</span><span class="o">,</span> <span class="n">p6</span><span class="o">,</span> <span class="n">p7</span><span class="o">,</span> <span class="n">p8</span><span class="o">)</span>
+    <span class="n">add</span> <span class="o">(</span><span class="n">matrix</span> <span class="o">*</span> <span class="n">p</span><span class="o">)</span> <span class="n">to</span> <span class="n">new_bbox</span>
+  <span class="k">end</span> <span class="k">for</span>
+
+  <span class="k">return</span> <span class="n">new_bbox</span>
+<span class="k">end</span> <span class="k">function</span>
+</div></pre>
+<p>Doing this ensures that the new bounding box is sufficiently large to hold the original cube after rotation.</p>
+
+<p>Got that all passing? Awesome! You're finally ready to wrap some bounding boxes around aggregate shapes like groups and CSG objects. Read on!</p>
+<h3>Bounds for groups and CSG</h3>
+<p>So, now that you can transform a bounding box, you can implement a function for reporting a shape's bounds in the space of the shape's parent.</p>
+
+<pre class="code feature "><div class="pre-title">shapes.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> Querying a shape's bounding box in its parent's space</span>
+  <span class="k">Given</span> shape <span class="p">←</span> <span class="nv">sphere</span><span class="o">(</span><span class="p">)</span>
+    <span class="k">And</span> <span class="nv">set_transform</span><span class="o">(</span>shape, <span class="nv">translation</span><span class="o">(</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">3</span>, <span class="mi">5</span><span class="p">)</span> <span class="p">*</span> <span class="nv">scaling</span><span class="o">(</span><span class="mf">0.5</span>, <span class="mi">2</span>, <span class="mi">4</span><span class="p">))</span>
+  <span class="k">When</span> box <span class="p">←</span> <span class="nv">parent_space_bounds_of</span><span class="o">(</span>shape<span class="p">)</span>
+  <span class="k">Then</span> box<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mf">0.5</span>, <span class="p">-</span><span class="mi">5</span>, <span class="mi">1</span><span class="p">)</span>
+    <span class="k">And</span> box<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mf">1.5</span>, <span class="p">-</span><span class="mi">1</span>, <span class="mi">9</span><span class="p">)</span>
+</div></pre>
+
+<p>This is accomplished by transforming the shape's bounding box by the shape's transformation matrix.</p>
+<pre class="code pseudo "><div class="pre-content"><span class="k">function</span> <span class="nv">parent_space_bounds_of</span><span class="o">(</span><span class="n">shape</span><span class="o">)</span>
+  <span class="k">return</span> <span class="nv">transform</span><span class="o">(</span><span class="nv">bounds_of</span><span class="o">(</span><span class="n">shape</span><span class="o">),</span> <span class="n">shape</span><span class="o">.</span><span class="n">transform</span><span class="o">)</span>
+<span class="k">end</span> <span class="k">function</span>
+</div></pre>
+<p>With that function in hand, you're ready to find the bounds of a <code>Group</code> object. The following test sets up a group with a transformed sphere and cylinder, and shows that the bounds of the group are sufficient to include the child shapes.</p>
+
+<pre class="code feature "><div class="pre-title">groups.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> A group has a bounding box that contains its children</span>
+  <span class="k">Given</span> s <span class="p">←</span> <span class="nv">sphere</span><span class="o">(</span><span class="p">)</span>
+    <span class="k">And</span> <span class="nv">set_transform</span><span class="o">(</span>s, <span class="nv">translation</span><span class="o">(</span><span class="mi">2</span>, <span class="mi">5</span>, <span class="p">-</span><span class="mi">3</span><span class="p">)</span> <span class="p">*</span> <span class="nv">scaling</span><span class="o">(</span><span class="mi">2</span>, <span class="mi">2</span>, <span class="mi">2</span><span class="p">))</span>
+    <span class="k">And</span> c <span class="p">←</span> <span class="nv">cylinder</span><span class="o">(</span><span class="p">)</span>
+    <span class="k">And</span> c<span class="p">.</span>minimum <span class="p">←</span> <span class="p">-</span><span class="mi">2</span>
+    <span class="k">And</span> c<span class="p">.</span>maximum <span class="p">←</span> <span class="mi">2</span>
+    <span class="k">And</span> <span class="nv">set_transform</span><span class="o">(</span>c, <span class="nv">translation</span><span class="o">(</span><span class="p">-</span><span class="mi">4</span>, <span class="p">-</span><span class="mi">1</span>, <span class="mi">4</span><span class="p">)</span> <span class="p">*</span> <span class="nv">scaling</span><span class="o">(</span><span class="mf">0.5</span>, <span class="mi">1</span>, <span class="mf">0.5</span><span class="p">))</span>
+    <span class="k">And</span> shape <span class="p">←</span> <span class="nv">group</span><span class="o">(</span><span class="p">)</span>
+    <span class="k">And</span> <span class="nv">add_child</span><span class="o">(</span>shape, s<span class="p">)</span>
+    <span class="k">And</span> <span class="nv">add_child</span><span class="o">(</span>shape, c<span class="p">)</span>
+  <span class="k">When</span> box <span class="p">←</span> <span class="nv">bounds_of</span><span class="o">(</span>shape<span class="p">)</span>
+  <span class="k">Then</span> box<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mf">4.5</span>, <span class="p">-</span><span class="mi">3</span>, <span class="p">-</span><span class="mi">5</span><span class="p">)</span>
+    <span class="k">And</span> box<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mi">4</span>, <span class="mi">7</span>, <span class="mf">4.5</span><span class="p">)</span>
+</div></pre>
+
+<p>CSG objects, being aggregate shapes like groups, should behave the same way, by reporting a bounding box sufficiently large to inculde their children.</p>
+
+<pre class="code feature "><div class="pre-title">csg.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> A CSG shape has a bounding box that contains its children</span>
+  <span class="k">Given</span> left <span class="p">←</span> <span class="nv">sphere</span><span class="o">(</span><span class="p">)</span>
+    <span class="k">And</span> right <span class="p">←</span> <span class="nv">sphere</span><span class="o">(</span><span class="p">)</span> with<span class="p">:</span>
+      <span class="p">|</span> transform <span class="p">|</span> <span class="nv">translation</span><span class="o">(</span><span class="mi">2</span>, <span class="mi">3</span>, <span class="mi">4</span><span class="p">)</span> <span class="p">|</span>
+    <span class="k">And</span> shape <span class="p">←</span> <span class="nv">csg</span><span class="o">(</span><span class="s2">"difference"</span>, left, right<span class="p">)</span>
+  <span class="k">When</span> box <span class="p">←</span> <span class="nv">bounds_of</span><span class="o">(</span>shape<span class="p">)</span>
+  <span class="k">Then</span> box<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">1</span><span class="p">)</span>
+    <span class="k">And</span> box<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mi">3</span>, <span class="mi">4</span>, <span class="mi">5</span><span class="p">)</span>
+</div></pre>
+
+<p>Make these two tests pass by implementing the <code>bounds_of(shape)</code> function for each of <code>Group</code> and <code>CSG</code>. Both functions must find the parent-space bounds of each child object, and then merge them all together into a single bounding box. Here's the pseudocode for the <code>Group</code> version, to get you started:</p>
+<pre class="code pseudo "><div class="pre-content"><span class="k">function</span> <span class="nv">bounds_of</span><span class="o">(</span><span class="n">group</span><span class="o">)</span>
+  <span class="k">let</span> <span class="n">box</span> <span class="o">←</span> <span class="nv">bounding_box</span><span class="o">(</span><span class="n">empty</span><span class="o">)</span>
+
+  <span class="k">for</span> <span class="n">each</span> <span class="n">child</span> <span class="n">of</span> <span class="n">group</span>
+    <span class="k">let</span> <span class="n">cbox</span> <span class="o">←</span> <span class="nv">parent_space_bounds_of</span><span class="o">(</span><span class="n">child</span><span class="o">)</span>
+    <span class="n">add</span> <span class="n">cbox</span> <span class="n">to</span> <span class="n">box</span>
+  <span class="k">end</span> <span class="k">for</span>
+
+  <span class="k">return</span> <span class="n">box</span>
+<span class="k">end</span> <span class="k">function</span>
+</div></pre>
+<p>Got that? Great! Next up, you'll do a handy bit of refactoring to be able to intersect rays with these bounding boxes.</p>
+<h3>Intersecting a bounding box</h3>
+<p>Having a bounding box for every shape in your ray tracer is great and all, but it won't do you any good unless you also teach your ray tracer how to see if a ray intersects those boxes. Fortunately, you've already implemented this feature!</p>
+
+<p>Well, almost.</p>
+
+<p>Back in chapter 12, "Cubes", of <a href="http://www.raytracerchallenge.com/">The Ray Tracer Challenge</a>, you wrote some code that tests a ray against an axis-aligned bounding box (specifically, a cube) centered at the origin. For this section, you'll take that code and refactor it slightly so that it works with AABB's of any dimension and position.</p>
+
+<p>Start with the following test, which tests the intersection between a ray and a cube-shaped AABB at the origin.</p>
+
+<pre class="code feature "><div class="pre-title">bounds.feature</div><div class="pre-content"><span class="k">Scenario Outline</span><span class="p">:</span><span class="s2"> Intersecting a ray with a bounding box at the origin</span>
+  <span class="k">Given</span> box <span class="p">←</span> <span class="nv">bounding_box</span><span class="o">(</span>min<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">1</span><span class="p">)</span> max<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="mi">1</span>, <span class="mi">1</span>, <span class="mi">1</span><span class="p">))</span>
+    <span class="k">And</span> direction <span class="p">←</span> <span class="nv">normalize</span><span class="o">(</span><span class="nv">&lt;direction&gt;</span><span class="p">)</span>
+    <span class="k">And</span> r <span class="p">←</span> <span class="nv">ray</span><span class="o">(</span><span class="nv">&lt;origin&gt;</span>, direction<span class="p">)</span>
+  <span class="k">Then</span> <span class="nv">intersects</span><span class="o">(</span>box, r<span class="p">)</span> is <span class="nv">&lt;result&gt;</span>
+
+  <span class="k">Examples</span><span class="p">:</span>
+    <span class="p">|</span> origin            <span class="p">|</span> direction        <span class="p">|</span> result <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">5</span>, <span class="mf">0.5</span>, <span class="mi">0</span><span class="p">)</span>  <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="mi">0</span>, <span class="mi">0</span><span class="p">)</span> <span class="p">|</span> true   <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">5</span>, <span class="mf">0.5</span>, <span class="mi">0</span><span class="p">)</span> <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="mi">1</span>, <span class="mi">0</span>, <span class="mi">0</span><span class="p">)</span>  <span class="p">|</span> true   <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mf">0.5</span>, <span class="mi">5</span>, <span class="mi">0</span><span class="p">)</span>  <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="mi">0</span>, <span class="p">-</span><span class="mi">1</span>, <span class="mi">0</span><span class="p">)</span> <span class="p">|</span> true   <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mf">0.5</span>, <span class="p">-</span><span class="mi">5</span>, <span class="mi">0</span><span class="p">)</span> <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="mi">0</span>, <span class="mi">1</span>, <span class="mi">0</span><span class="p">)</span>  <span class="p">|</span> true   <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mf">0.5</span>, <span class="mi">0</span>, <span class="mi">5</span><span class="p">)</span>  <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="mi">0</span>, <span class="mi">0</span>, <span class="p">-</span><span class="mi">1</span><span class="p">)</span> <span class="p">|</span> true   <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mf">0.5</span>, <span class="mi">0</span>, <span class="p">-</span><span class="mi">5</span><span class="p">)</span> <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="mi">0</span>, <span class="mi">0</span>, <span class="mi">1</span><span class="p">)</span>  <span class="p">|</span> true   <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">0</span>, <span class="mf">0.5</span>, <span class="mi">0</span><span class="p">)</span>  <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="mi">0</span>, <span class="mi">0</span>, <span class="mi">1</span><span class="p">)</span>  <span class="p">|</span> true   <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">2</span>, <span class="mi">0</span>, <span class="mi">0</span><span class="p">)</span>   <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="mi">2</span>, <span class="mi">4</span>, <span class="mi">6</span><span class="p">)</span>  <span class="p">|</span> false  <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">0</span>, <span class="p">-</span><span class="mi">2</span>, <span class="mi">0</span><span class="p">)</span>   <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="mi">6</span>, <span class="mi">2</span>, <span class="mi">4</span><span class="p">)</span>  <span class="p">|</span> false  <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">0</span>, <span class="mi">0</span>, <span class="p">-</span><span class="mi">2</span><span class="p">)</span>   <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="mi">4</span>, <span class="mi">6</span>, <span class="mi">2</span><span class="p">)</span>  <span class="p">|</span> false  <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">2</span>, <span class="mi">0</span>, <span class="mi">2</span><span class="p">)</span>    <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="mi">0</span>, <span class="mi">0</span>, <span class="p">-</span><span class="mi">1</span><span class="p">)</span> <span class="p">|</span> false  <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">0</span>, <span class="mi">2</span>, <span class="mi">2</span><span class="p">)</span>    <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="mi">0</span>, <span class="p">-</span><span class="mi">1</span>, <span class="mi">0</span><span class="p">)</span> <span class="p">|</span> false  <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">2</span>, <span class="mi">2</span>, <span class="mi">0</span><span class="p">)</span>    <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="mi">0</span>, <span class="mi">0</span><span class="p">)</span> <span class="p">|</span> false  <span class="p">|</span>
+</div></pre>
+
+<div class="aside note"><p>The <code>intersects(box, ray)</code> function returns a boolean value here. This is because (for the purposes of this feature) you don't need to know exactly <em>where</em> the bounding box is intersected, just whether or not it was. However, if you care about reusing code (and you should!), and you'd like your cube's <code>local_intersect()</code> function to be able to share this logic, you'll need to allow the function to report where the intersections occur. For this bonus chapter, though, the tests will only worry about <code>true</code> and <code>false</code> return values.</p>
+</div>
+
+<p>You can make that test pass by (re)using the logic from your cube's <code>local_intersect()</code> function. The next test, though, will require you to "massage" that code a bit, so that it can work with a bounding box that is <em>not</em> centered at the origin, and is <em>not</em> a perfect cube.</p>
+
+<pre class="code feature "><div class="pre-title">bounds.feature</div><div class="pre-content"><span class="k">Scenario Outline</span><span class="p">:</span><span class="s2"> Intersecting a ray with a non-cubic bounding box</span>
+  <span class="k">Given</span> box <span class="p">←</span> <span class="nv">bounding_box</span><span class="o">(</span>min<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="mi">5</span>, <span class="p">-</span><span class="mi">2</span>, <span class="mi">0</span><span class="p">)</span> max<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="mi">11</span>, <span class="mi">4</span>, <span class="mi">7</span><span class="p">))</span>
+    <span class="k">And</span> direction <span class="p">←</span> <span class="nv">normalize</span><span class="o">(</span><span class="nv">&lt;direction&gt;</span><span class="p">)</span>
+    <span class="k">And</span> r <span class="p">←</span> <span class="nv">ray</span><span class="o">(</span><span class="nv">&lt;origin&gt;</span>, direction<span class="p">)</span>
+  <span class="k">Then</span> <span class="nv">intersects</span><span class="o">(</span>box, r<span class="p">)</span> is <span class="nv">&lt;result&gt;</span>
+
+  <span class="k">Examples</span><span class="p">:</span>
+    <span class="p">|</span> origin           <span class="p">|</span> direction        <span class="p">|</span> result <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">15</span>, <span class="mi">1</span>, <span class="mi">2</span><span class="p">)</span>  <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="mi">0</span>, <span class="mi">0</span><span class="p">)</span> <span class="p">|</span> true   <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">5</span>, <span class="p">-</span><span class="mi">1</span>, <span class="mi">4</span><span class="p">)</span> <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="mi">1</span>, <span class="mi">0</span>, <span class="mi">0</span><span class="p">)</span>  <span class="p">|</span> true   <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">7</span>, <span class="mi">6</span>, <span class="mi">5</span><span class="p">)</span>   <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="mi">0</span>, <span class="p">-</span><span class="mi">1</span>, <span class="mi">0</span><span class="p">)</span> <span class="p">|</span> true   <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">9</span>, <span class="p">-</span><span class="mi">5</span>, <span class="mi">6</span><span class="p">)</span>  <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="mi">0</span>, <span class="mi">1</span>, <span class="mi">0</span><span class="p">)</span>  <span class="p">|</span> true   <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">8</span>, <span class="mi">2</span>, <span class="mi">12</span><span class="p">)</span>  <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="mi">0</span>, <span class="mi">0</span>, <span class="p">-</span><span class="mi">1</span><span class="p">)</span> <span class="p">|</span> true   <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">6</span>, <span class="mi">0</span>, <span class="p">-</span><span class="mi">5</span><span class="p">)</span>  <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="mi">0</span>, <span class="mi">0</span>, <span class="mi">1</span><span class="p">)</span>  <span class="p">|</span> true   <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">8</span>, <span class="mi">1</span>, <span class="mf">3.5</span><span class="p">)</span> <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="mi">0</span>, <span class="mi">0</span>, <span class="mi">1</span><span class="p">)</span>  <span class="p">|</span> true   <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">9</span>, <span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">8</span><span class="p">)</span> <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="mi">2</span>, <span class="mi">4</span>, <span class="mi">6</span><span class="p">)</span>  <span class="p">|</span> false  <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">8</span>, <span class="mi">3</span>, <span class="p">-</span><span class="mi">4</span><span class="p">)</span>  <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="mi">6</span>, <span class="mi">2</span>, <span class="mi">4</span><span class="p">)</span>  <span class="p">|</span> false  <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">9</span>, <span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">2</span><span class="p">)</span> <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="mi">4</span>, <span class="mi">6</span>, <span class="mi">2</span><span class="p">)</span>  <span class="p">|</span> false  <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">4</span>, <span class="mi">0</span>, <span class="mi">9</span><span class="p">)</span>   <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="mi">0</span>, <span class="mi">0</span>, <span class="p">-</span><span class="mi">1</span><span class="p">)</span> <span class="p">|</span> false  <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">8</span>, <span class="mi">6</span>, <span class="p">-</span><span class="mi">1</span><span class="p">)</span>  <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="mi">0</span>, <span class="p">-</span><span class="mi">1</span>, <span class="mi">0</span><span class="p">)</span> <span class="p">|</span> false  <span class="p">|</span>
+    <span class="p">|</span> <span class="nv">point</span><span class="o">(</span><span class="mi">12</span>, <span class="mi">5</span>, <span class="mi">4</span><span class="p">)</span>  <span class="p">|</span> <span class="nv">vector</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="mi">0</span>, <span class="mi">0</span><span class="p">)</span> <span class="p">|</span> false  <span class="p">|</span>
+</div></pre>
+
+<p>Your current <code>check_axis()</code> function (from the "Cubes" chapter), assumes that the cube extends from -1 to 1 along each axis, so it hard codes <code>-1</code> and <code>1</code>. To make it work for this more general algorithm, you'll need to pass the minimum and maximum extents of the bounding box for the axis in question. The following pseudocode adds the <code>min</code> and <code>max</code> parameters to the function. Careful, though: these are <em>not</em> the same as the <code>min</code> and <code>max</code> points of your bounding box. For this function, they are floating point values, just the <code>x</code> or <code>y</code> or <code>z</code> components from those points.</p>
+<pre class="code pseudo "><div class="pre-content"><span class="k">function</span> <span class="nv">check_axis</span><span class="o">(</span><span class="n">origin</span><span class="o">,</span> <span class="n">direction</span><span class="o">,</span> <span class="n">min</span><span class="o">,</span> <span class="n">max</span><span class="o">)</span>
+  <span class="n">tmin_numerator</span> <span class="o">=</span> <span class="o">(</span><span class="n">min</span> <span class="o">-</span> <span class="n">origin</span><span class="o">)</span>
+  <span class="n">tmax_numerator</span> <span class="o">=</span> <span class="o">(</span><span class="n">max</span> <span class="o">-</span> <span class="n">origin</span><span class="o">)</span>
+<span class="o">...</span>
+</div></pre>
+<p>The intersect function, then, sends the minimum and maximum values with each invocation of <code>check_axis()</code>, like this:</p>
+<pre class="code pseudo "><div class="pre-content"><span class="n">xtmin</span><span class="o">,</span> <span class="n">xtmax</span> <span class="o">←</span> <span class="nv">check_axis</span><span class="o">(</span><span class="n">ray</span><span class="o">.</span><span class="n">origin</span><span class="o">.</span><span class="n">x</span><span class="o">,</span> <span class="n">ray</span><span class="o">.</span><span class="n">direction</span><span class="o">.</span><span class="n">x</span><span class="o">,</span> <span class="n">min</span><span class="o">.</span><span class="n">x</span><span class="o">,</span> <span class="n">max</span><span class="o">.</span><span class="n">x</span><span class="o">)</span>
+<span class="c1"># and so forth for y and z axes
+</span></div></pre>
+<p>With those changes, your tests should all be passing. You're ready now to plug this in and make it all work together.</p>
+<h3>Using the bounding box as an optimization</h3>
+<p>Once you can intersect a ray with a bounding box, you can put them to work. The main idea of this optimization is that when you need to see if a ray intersects a <code>Group</code> or <code>CSG</code> shape, you first check the ray against the bounding box of the <code>Group</code> or <code>CSG</code>. If (and only if) the ray intersects the bounding box, you then proceed to check the ray against the children of the <code>Group</code> or <code>CSG</code>.</p>
+
+<p>These two tests demonstrate how it works with <code>Group</code>. They both use the <code>test_shape()</code> function you implemented in chapter 9, "Planes", and take advantage of the fact that the test shape will store a reference to the ray that it was intersected with. This way, if the saved ray is not set, then you know that no intersection was attempted against that shape.</p>
+
+<pre class="code feature "><div class="pre-title">groups.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> Intersecting ray+group doesn't test children if box is missed</span>
+  <span class="k">Given</span> child <span class="p">←</span> <span class="nv">test_shape</span><span class="o">(</span><span class="p">)</span>
+    <span class="k">And</span> shape <span class="p">←</span> <span class="nv">group</span><span class="o">(</span><span class="p">)</span>
+    <span class="k">And</span> <span class="nv">add_child</span><span class="o">(</span>shape, child<span class="p">)</span>
+    <span class="k">And</span> r <span class="p">←</span> <span class="nv">ray</span><span class="o">(</span><span class="nv">point</span><span class="o">(</span><span class="mi">0</span>, <span class="mi">0</span>, <span class="p">-</span><span class="mi">5</span><span class="p">)</span>, <span class="nv">vector</span><span class="o">(</span><span class="mi">0</span>, <span class="mi">1</span>, <span class="mi">0</span><span class="p">))</span>
+  <span class="k">When</span> xs <span class="p">←</span> <span class="nv">intersect</span><span class="o">(</span>shape, r<span class="p">)</span>
+  <span class="k">Then</span> child<span class="p">.</span>saved_ray is unset
+
+<span class="k">Scenario</span><span class="p">:</span><span class="s2"> Intersecting ray+group tests children if box is hit</span>
+  <span class="k">Given</span> child <span class="p">←</span> <span class="nv">test_shape</span><span class="o">(</span><span class="p">)</span>
+    <span class="k">And</span> shape <span class="p">←</span> <span class="nv">group</span><span class="o">(</span><span class="p">)</span>
+    <span class="k">And</span> <span class="nv">add_child</span><span class="o">(</span>shape, child<span class="p">)</span>
+    <span class="k">And</span> r <span class="p">←</span> <span class="nv">ray</span><span class="o">(</span><span class="nv">point</span><span class="o">(</span><span class="mi">0</span>, <span class="mi">0</span>, <span class="p">-</span><span class="mi">5</span><span class="p">)</span>, <span class="nv">vector</span><span class="o">(</span><span class="mi">0</span>, <span class="mi">0</span>, <span class="mi">1</span><span class="p">))</span>
+  <span class="k">When</span> xs <span class="p">←</span> <span class="nv">intersect</span><span class="o">(</span>shape, r<span class="p">)</span>
+  <span class="k">Then</span> child<span class="p">.</span>saved_ray is set
+</div></pre>
+
+<p>The same is true when testing whether the <code>CSG</code> shape takes advantage of its bounding box, but this time both the <code>left</code> and <code>right</code> children are checked.</p>
+
+<pre class="code feature "><div class="pre-title">csg.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> Intersecting ray+csg doesn't test children if box is missed</span>
+  <span class="k">Given</span> left <span class="p">←</span> <span class="nv">test_shape</span><span class="o">(</span><span class="p">)</span>
+    <span class="k">And</span> right <span class="p">←</span> <span class="nv">test_shape</span><span class="o">(</span><span class="p">)</span>
+    <span class="k">And</span> shape <span class="p">←</span> <span class="nv">csg</span><span class="o">(</span><span class="s2">"difference"</span>, left, right<span class="p">)</span>
+    <span class="k">And</span> r <span class="p">←</span> <span class="nv">ray</span><span class="o">(</span><span class="nv">point</span><span class="o">(</span><span class="mi">0</span>, <span class="mi">0</span>, <span class="p">-</span><span class="mi">5</span><span class="p">)</span>, <span class="nv">vector</span><span class="o">(</span><span class="mi">0</span>, <span class="mi">1</span>, <span class="mi">0</span><span class="p">))</span>
+  <span class="k">When</span> xs <span class="p">←</span> <span class="nv">intersect</span><span class="o">(</span>shape, r<span class="p">)</span>
+  <span class="k">Then</span> left<span class="p">.</span>saved_ray is unset
+    <span class="k">And</span> right<span class="p">.</span>saved_ray is unset
+
+<span class="k">Scenario</span><span class="p">:</span><span class="s2"> Intersecting ray+csg tests children if box is hit</span>
+  <span class="k">Given</span> left <span class="p">←</span> <span class="nv">test_shape</span><span class="o">(</span><span class="p">)</span>
+    <span class="k">And</span> right <span class="p">←</span> <span class="nv">test_shape</span><span class="o">(</span><span class="p">)</span>
+    <span class="k">And</span> shape <span class="p">←</span> <span class="nv">csg</span><span class="o">(</span><span class="s2">"difference"</span>, left, right<span class="p">)</span>
+    <span class="k">And</span> r <span class="p">←</span> <span class="nv">ray</span><span class="o">(</span><span class="nv">point</span><span class="o">(</span><span class="mi">0</span>, <span class="mi">0</span>, <span class="p">-</span><span class="mi">5</span><span class="p">)</span>, <span class="nv">vector</span><span class="o">(</span><span class="mi">0</span>, <span class="mi">0</span>, <span class="mi">1</span><span class="p">))</span>
+  <span class="k">When</span> xs <span class="p">←</span> <span class="nv">intersect</span><span class="o">(</span>shape, r<span class="p">)</span>
+  <span class="k">Then</span> left<span class="p">.</span>saved_ray is set
+    <span class="k">And</span> right<span class="p">.</span>saved_ray is set
+</div></pre>
+
+<p>In pseudocode, the <code>local_intersect()</code> function for both the <code>Group</code> and <code>CSG</code> shapes should be modified to look something like this:</p>
+<pre class="code pseudo "><div class="pre-content"><span class="k">function</span> <span class="nv">local_intersect</span><span class="o">(</span><span class="n">shape</span><span class="o">,</span> <span class="n">ray</span><span class="o">)</span>
+  <span class="k">if</span> <span class="nv">intersects</span><span class="o">(</span><span class="nv">bounds_of</span><span class="o">(</span><span class="n">shape</span><span class="o">),</span> <span class="n">ray</span><span class="o">)</span>
+    <span class="c1"># perform the usual intersection logic
+</span>    <span class="c1"># ...
+</span>  <span class="k">else</span>
+    <span class="c1"># nothing intersected
+</span>    <span class="k">return</span> <span class="o">()</span>
+  <span class="k">end</span> <span class="k">if</span>
+<span class="k">end</span> <span class="k">function</span>
+</div></pre>
+<p>Awesome! With that in place, we can revisit that first illustration, with a thousand spheres arranged in a cube. Putting all thousand spheres into a single group will make it so that any ray that misses the group's bounding box will trivially miss all those spheres, too, and will give the scene a bit of a boost. You can do even better if you use eight groups (of 5x5x5 spheres each) instead of a single group.</p>
+
+<p>Go ahead and try rendering something complex, like a model with a few thousand triangles in it, and see what kind of speed-up you get from this. Your renderer will still bog down when a ray intersects the model's bounding box, because it will need to test all those thousands of triangles, but it should still be significantly faster than without the bounding box.</p>
+
+<p>It can, however, be better. Let's finish the bonus chapter off with a little chat about <em>bounding volume hierarchies</em>.</p>
+<h2>Bounding Volume Hierarchies (BVH)</h2>
+<p>So, you've got a group, and the group contains a few thousand shapes. Maybe they're triangles. I don't know. It doesn't really matter.</p>
+
+<p>The bounding box around the group helps. It means that any ray that misses the bounding box won't have to be tested against any of those thousands of shapes. However, once the ray intersects the box, all bets are off.</p>
+
+<p>So...what if you were to take all the children of that group, and divide them into two subgroups? Now, if the ray hits the outermost group, it will be tested against the group's two children—those two subgroups—each of which has its own bounding box.</p>
+
+<p>Let's take it even further: what if you were to subdivide each of those subgroups in half again? In fact, just keep subdividing, chopping each group in half and partitioning the children based on which half they belong to. You wind up with a tree structure, groups containing groups, all the way down to the leaf nodes.</p>
+
+<p><img src="./Bounding boxes_files/bbox-tree.png" class="medium" width="783" height="627"></p>
+
+<p>This is what is meant by a <em>bounding volume hierarchy</em>, or <em>BVH</em>. It's a hierarchy of these groups, each with a bounding box describing a smaller and smaller subset of the whole.</p>
+
+<div class="aside note"><p>There are lots of ways to optimize large scenes. A BVH is only one of them. Other things you might read about are <em>binary space partitioning</em> (or <em>BSP</em>), <em>quadtrees</em>, <em>octrees</em>, and more. They all have different strengths and weaknesses. For this chapter, we're focusing solely on BVH's, but once you're done here, you should definitely go research some of the other techniques, too!</p>
+</div>
+
+<p>You're going to finish off this chapter by implementing a (relatively naive) BVH using groups and bounding boxes. It'll have plenty of room for improvement, but should still be enough to give your renders significantly more speed. The process will go like this:</p>
+
+<ol>
+<li>Split a bounding box into two equal halves.</li>
+<li>Partition the children of a group into appropriate subgroups.</li>
+<li>Recursively divide <code>Group</code> and <code>CSG</code> objects.</li>
+</ol>
+
+<p>Almost done. Here we go!</p>
+<h3>Splitting a bounding box</h3>
+<p>For this feature, you're going to implement splitting in the least-complicated way. You're not going to worry about how the objects are distributed within the bounding box, or anything like that—you'll just split the box geometrically in half, perpendicular to one of the three axes, <code>x</code>, <code>y</code>, or <code>z</code>.</p>
+
+<p>The following tests introduce a new function, <code>split_bounds(box)</code>, which returns two non-overlapping bounding boxes that cover the same volume as the original bounding box. Generally, you'll split whichever axis is longest. In the case of a perfect cube, though, let's just say you'll split it perpendicular to the <code>x</code> axis, as shown in this test with a 10x10x10 cube.</p>
+
+<pre class="code feature "><div class="pre-title">bounds.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> Splitting a perfect cube</span>
+  <span class="k">Given</span> box <span class="p">←</span> <span class="nv">bounding_box</span><span class="o">(</span>min<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">4</span>, <span class="p">-</span><span class="mi">5</span><span class="p">)</span> max<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="mi">9</span>, <span class="mi">6</span>, <span class="mi">5</span><span class="p">))</span>
+  <span class="k">When</span> <span class="p">(</span>left, right<span class="p">)</span> <span class="p">←</span> <span class="nv">split_bounds</span><span class="o">(</span>box<span class="p">)</span>
+  <span class="k">Then</span> left<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">4</span>, <span class="p">-</span><span class="mi">5</span><span class="p">)</span>
+    <span class="k">And</span> left<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mi">4</span>, <span class="mi">6</span>, <span class="mi">5</span><span class="p">)</span>
+    <span class="k">And</span> right<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mi">4</span>, <span class="p">-</span><span class="mi">4</span>, <span class="p">-</span><span class="mi">5</span><span class="p">)</span>
+    <span class="k">And</span> right<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mi">9</span>, <span class="mi">6</span>, <span class="mi">5</span><span class="p">)</span>
+</div></pre>
+
+<p>When there is a longer axis, though, you'll spilt perpendicular to that one. The following three tests show how <code>split_bounds()</code> works when the bounding box is longest along any of the three axes.</p>
+
+<pre class="code feature "><div class="pre-title">bounds.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> Splitting an x-wide box</span>
+  <span class="k">Given</span> box <span class="p">←</span> <span class="nv">bounding_box</span><span class="o">(</span>min<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">2</span>, <span class="p">-</span><span class="mi">3</span><span class="p">)</span> max<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="mi">9</span>, <span class="mf">5.5</span>, <span class="mi">3</span><span class="p">))</span>
+  <span class="k">When</span> <span class="p">(</span>left, right<span class="p">)</span> <span class="p">←</span> <span class="nv">split_bounds</span><span class="o">(</span>box<span class="p">)</span>
+  <span class="k">Then</span> left<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">2</span>, <span class="p">-</span><span class="mi">3</span><span class="p">)</span>
+    <span class="k">And</span> left<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mi">4</span>, <span class="mf">5.5</span>, <span class="mi">3</span><span class="p">)</span>
+    <span class="k">And</span> right<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mi">4</span>, <span class="p">-</span><span class="mi">2</span>, <span class="p">-</span><span class="mi">3</span><span class="p">)</span>
+    <span class="k">And</span> right<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mi">9</span>, <span class="mf">5.5</span>, <span class="mi">3</span><span class="p">)</span>
+
+<span class="k">Scenario</span><span class="p">:</span><span class="s2"> Splitting a y-wide box</span>
+  <span class="k">Given</span> box <span class="p">←</span> <span class="nv">bounding_box</span><span class="o">(</span>min<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">2</span>, <span class="p">-</span><span class="mi">3</span><span class="p">)</span> max<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="mi">5</span>, <span class="mi">8</span>, <span class="mi">3</span><span class="p">))</span>
+  <span class="k">When</span> <span class="p">(</span>left, right<span class="p">)</span> <span class="p">←</span> <span class="nv">split_bounds</span><span class="o">(</span>box<span class="p">)</span>
+  <span class="k">Then</span> left<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">2</span>, <span class="p">-</span><span class="mi">3</span><span class="p">)</span>
+    <span class="k">And</span> left<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mi">5</span>, <span class="mi">3</span>, <span class="mi">3</span><span class="p">)</span>
+    <span class="k">And</span> right<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="mi">3</span>, <span class="p">-</span><span class="mi">3</span><span class="p">)</span>
+    <span class="k">And</span> right<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mi">5</span>, <span class="mi">8</span>, <span class="mi">3</span><span class="p">)</span>
+
+<span class="k">Scenario</span><span class="p">:</span><span class="s2"> Splitting a z-wide box</span>
+  <span class="k">Given</span> box <span class="p">←</span> <span class="nv">bounding_box</span><span class="o">(</span>min<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">2</span>, <span class="p">-</span><span class="mi">3</span><span class="p">)</span> max<span class="p">=</span><span class="nv">point</span><span class="o">(</span><span class="mi">5</span>, <span class="mi">3</span>, <span class="mi">7</span><span class="p">))</span>
+  <span class="k">When</span> <span class="p">(</span>left, right<span class="p">)</span> <span class="p">←</span> <span class="nv">split_bounds</span><span class="o">(</span>box<span class="p">)</span>
+  <span class="k">Then</span> left<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">2</span>, <span class="p">-</span><span class="mi">3</span><span class="p">)</span>
+    <span class="k">And</span> left<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mi">5</span>, <span class="mi">3</span>, <span class="mi">2</span><span class="p">)</span>
+    <span class="k">And</span> right<span class="p">.</span>min <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="p">-</span><span class="mi">1</span>, <span class="p">-</span><span class="mi">2</span>, <span class="mi">2</span><span class="p">)</span>
+    <span class="k">And</span> right<span class="p">.</span>max <span class="p">=</span> <span class="nv">point</span><span class="o">(</span><span class="mi">5</span>, <span class="mi">3</span>, <span class="mi">7</span><span class="p">)</span>
+</div></pre>
+
+<p>Here's one way to implement the <code>split_bounds()</code> function:</p>
+<pre class="code pseudo "><div class="pre-content"><span class="k">function</span> <span class="nv">split_bounds</span><span class="o">(</span><span class="n">box</span><span class="o">)</span>
+  <span class="c1"># figure out the box's largest dimension
+</span>  <span class="n">dx</span> <span class="o">←</span> <span class="n">size</span> <span class="n">of</span> <span class="n">box</span> <span class="n">in</span> <span class="n">x</span>
+  <span class="n">dy</span> <span class="o">←</span> <span class="n">size</span> <span class="n">of</span> <span class="n">box</span> <span class="n">in</span> <span class="n">y</span>
+  <span class="n">dz</span> <span class="o">←</span> <span class="n">size</span> <span class="n">of</span> <span class="n">box</span> <span class="n">in</span> <span class="n">z</span>
+
+  <span class="n">greatest</span> <span class="o">←</span> <span class="n">maximum</span> <span class="n">of</span> <span class="n">dx</span><span class="o">,</span> <span class="n">dy</span><span class="o">,</span> <span class="n">dz</span>
+
+  <span class="c1"># variables to help construct the points on
+</span>  <span class="c1"># the dividing plane
+</span>  <span class="o">(</span><span class="n">x0</span><span class="o">,</span> <span class="n">y0</span><span class="o">,</span> <span class="n">z0</span><span class="o">)</span> <span class="o">←</span> <span class="o">(</span><span class="n">x</span><span class="o">,</span> <span class="n">y</span><span class="o">,</span> <span class="n">z</span><span class="o">)</span> <span class="n">from</span> <span class="n">box</span><span class="o">.</span><span class="n">min</span>
+  <span class="o">(</span><span class="n">x1</span><span class="o">,</span> <span class="n">y1</span><span class="o">,</span> <span class="n">z1</span><span class="o">)</span> <span class="o">←</span> <span class="o">(</span><span class="n">x</span><span class="o">,</span> <span class="n">y</span><span class="o">,</span> <span class="n">z</span><span class="o">)</span> <span class="n">from</span> <span class="n">box</span><span class="o">.</span><span class="n">max</span>
+
+  <span class="c1"># adjust the points so that they lie on the
+</span>  <span class="c1"># dividing plane
+</span>  <span class="k">if</span> <span class="n">greatest</span> <span class="o">=</span> <span class="n">dx</span> <span class="k">then</span>
+    <span class="n">x0</span> <span class="o">←</span> <span class="n">x1</span> <span class="o">←</span> <span class="n">x0</span> <span class="o">+</span> <span class="n">dx</span> <span class="o">/</span> <span class="mf">2.0</span>
+  <span class="k">else</span> <span class="k">if</span> <span class="n">greatest</span> <span class="o">=</span> <span class="n">dy</span> <span class="k">then</span>
+    <span class="n">y0</span> <span class="o">←</span> <span class="n">y1</span> <span class="o">←</span> <span class="n">y0</span> <span class="o">+</span> <span class="n">dy</span> <span class="o">/</span> <span class="mf">2.0</span>
+  <span class="k">else</span>
+    <span class="n">z0</span> <span class="o">←</span> <span class="n">z1</span> <span class="o">←</span> <span class="n">z0</span> <span class="o">+</span> <span class="n">dz</span> <span class="o">/</span> <span class="mf">2.0</span>
+  <span class="k">end</span> <span class="k">if</span>
+
+  <span class="n">mid_min</span> <span class="o">←</span> <span class="nv">point</span><span class="o">(</span><span class="n">x0</span><span class="o">,</span> <span class="n">y0</span><span class="o">,</span> <span class="n">z0</span><span class="o">)</span>
+  <span class="n">mid_max</span> <span class="o">←</span> <span class="nv">point</span><span class="o">(</span><span class="n">x1</span><span class="o">,</span> <span class="n">y1</span><span class="o">,</span> <span class="n">z1</span><span class="o">)</span>
+
+  <span class="c1"># construct and return the two halves of
+</span>  <span class="c1"># the bounding box
+</span>  <span class="n">left</span> <span class="o">←</span> <span class="nv">bounding_box</span><span class="o">(</span><span class="n">min</span><span class="o">=</span><span class="n">box</span><span class="o">.</span><span class="n">min</span> <span class="n">max</span><span class="o">=</span><span class="n">mid_max</span><span class="o">)</span>
+  <span class="n">right</span> <span class="o">←</span> <span class="nv">bounding_box</span><span class="o">(</span><span class="n">min</span><span class="o">=</span><span class="n">mid_min</span> <span class="n">max</span><span class="o">=</span><span class="n">box</span><span class="o">.</span><span class="n">max</span><span class="o">)</span>
+
+  <span class="k">return</span> <span class="o">(</span><span class="n">left</span><span class="o">,</span> <span class="n">right</span><span class="o">)</span>
+<span class="k">end</span> <span class="k">function</span>
+</div></pre>
+<p>This works by figuring out which axis is the longest (by comparing <code>greatest</code> with the <code>dx</code>, <code>dy</code>, and <code>dz</code> variables) and then setting the minimum and maximum values for that axis to the midpoint between them. The <code>mid_min</code> and <code>mid_max</code> points represent opposite corners of the square on the dividing plane, which are then used to construct the new bounding boxes.</p>
+
+<p>Once those tests are passing, you can move to the next part: partitioning the children of a group.</p>
+<h3>Partitioning children into subgroups</h3>
+<p>So, you've divided your bounding box in half. The thing you'll quickly discover is that there's a good chance that not all of the objects in the original group will fit in one or the other of the new bounding boxes. Consider the following illustration:</p>
+
+<p><img src="./Bounding boxes_files/child-overlap.png" class="medium" width="511" height="239"></p>
+
+<p>You <em>could</em> try and figure out how to tesselate that sphere in the middle into triangles, and then split the triangles that intersect the bounding box boundaries, and yeah, that would probably make a great science project and you'd learn a ton, but for this chapter...nah. Let's take a shortcut.</p>
+
+<p>Instead of trying to force every object into one of the two bounding boxes, we'll let those that don't fit just be their best selves. We'll only partition those shapes that fit neatly into the two new bounding boxes.</p>
+
+<p>The following test illustrates this with a new function, <code>partition_children(group)</code>. It returns two lists, or "buckets", containing the children that fit into the corresponding halves of the group's bounding box. The children that are placed into those buckets are removed from <code>group</code>, as well.</p>
+
+<pre class="code feature "><div class="pre-title">groups.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> Partitioning a group's children</span>
+  <span class="k">Given</span> s1 <span class="p">←</span> <span class="nv">sphere</span><span class="o">(</span><span class="p">)</span> with<span class="p">:</span>
+      <span class="p">|</span> transform <span class="p">|</span> <span class="nv">translation</span><span class="o">(</span><span class="p">-</span><span class="mi">2</span>, <span class="mi">0</span>, <span class="mi">0</span><span class="p">)</span> <span class="p">|</span>
+    <span class="k">And</span> s2 <span class="p">←</span> <span class="nv">sphere</span><span class="o">(</span><span class="p">)</span> with<span class="p">:</span>
+      <span class="p">|</span> transform <span class="p">|</span> <span class="nv">translation</span><span class="o">(</span><span class="mi">2</span>, <span class="mi">0</span>, <span class="mi">0</span><span class="p">)</span> <span class="p">|</span>
+    <span class="k">And</span> s3 <span class="p">←</span> <span class="nv">sphere</span><span class="o">(</span><span class="p">)</span>
+    <span class="k">And</span> g <span class="p">←</span> <span class="nv">group</span><span class="o">(</span><span class="p">)</span> of <span class="p">[</span>s1, s2, s3<span class="p">]</span>
+  <span class="k">When</span> <span class="p">(</span>left, right<span class="p">)</span> <span class="p">←</span> <span class="nv">partition_children</span><span class="o">(</span>g<span class="p">)</span>
+  <span class="k">Then</span> g is a group of <span class="p">[</span>s3<span class="p">]</span>
+    <span class="k">And</span> left <span class="p">=</span> <span class="p">[</span>s1<span class="p">]</span>
+    <span class="k">And</span> right <span class="p">=</span> <span class="p">[</span>s2<span class="p">]</span>
+</div></pre>
+
+<p>Here's what that test is doing. The first two spheres, <code>s1</code> and <code>s2</code>, are translated so they fit into the left and right halves of the group's bounding box. The third, <code>s3</code>, sits in the middle, overlapping both halves. The resulting buckets contain <code>s1</code> and <code>s2</code>, but not <code>s3</code>.</p>
+
+<p>Once you have those two buckets, <code>left</code> and <code>right</code>, you can construct subgroups of them. The following test demonstrates this with a new function, <code>make_subgroup(group, list)</code>.</p>
+
+<pre class="code feature "><div class="pre-title">groups.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> Creating a sub-group from a list of children</span>
+  <span class="k">Given</span> s1 <span class="p">←</span> <span class="nv">sphere</span><span class="o">(</span><span class="p">)</span>
+    <span class="k">And</span> s2 <span class="p">←</span> <span class="nv">sphere</span><span class="o">(</span><span class="p">)</span>
+    <span class="k">And</span> g <span class="p">←</span> <span class="nv">group</span><span class="o">(</span><span class="p">)</span>
+  <span class="k">When</span> <span class="nv">make_subgroup</span><span class="o">(</span>g, <span class="p">[</span>s1, s2<span class="p">])</span>
+  <span class="k">Then</span> g<span class="p">.</span>count <span class="p">=</span> <span class="mi">1</span>
+    <span class="k">And</span> g<span class="p">[</span><span class="mi">0</span><span class="p">]</span> is a group of <span class="p">[</span>s1, s2<span class="p">]</span>
+</div></pre>
+
+<p>The <code>make_subgroup()</code> function creates a new subgroup and then adds each element of <code>list</code> to it. The subgroup is then added to <code>group</code>.</p>
+
+<p>You're almost there. It's practically the home stretch!</p>
+<h3>Dividing groups into subgroups</h3>
+<p>Group subdivision works recursively, splitting a group and then splitting each of the children of the group, all the way down until there's nothing left to divide. To facilitate this, you'll first implement <code>divide()</code> on the leaf nodes—the primitive shapes—before implementing it on <code>Group</code>, and then on <code>CSG</code>.</p>
+
+<p>The <code>divide()</code> function accepts two arguments: the shape to divide, and a threshold value. This threshold value only makes sense for groups, because it indicates the minimum number of children a group ought to have before it will be divided. A group with fewer children than the threshold will not be split (though it's children might be, if they themselves have more children than the threshold).</p>
+
+<p>This means that for primitive shapes, the threshold value is effectively ignored. Further, since we've already decided that the primitive shapes in your ray tracer are not divisible, the <code>divide()</code> function will do nothing at all! Here's a test showing this, using a threshold of 1 to emphasize that even with the most eager of settings, the primitive shapes will not be modified.</p>
+
+<pre class="code feature "><div class="pre-title">shapes.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> Subdividing a primitive does nothing</span>
+  <span class="k">Given</span> shape <span class="p">←</span> <span class="nv">sphere</span><span class="o">(</span><span class="p">)</span>
+  <span class="k">When</span> <span class="nv">divide</span><span class="o">(</span>shape, <span class="mi">1</span><span class="p">)</span>
+  <span class="k">Then</span> shape is a sphere
+</div></pre>
+
+<p>For a <code>Group</code> object, though, that threshold value plays a more important part. If the threshold is less than or equal to the number of children in the group, the children are partioned and corresponding subgroups formed and added to the group. Then, <code>divide()</code> is invoked on each of the group's children.</p>
+
+<p>To illustrate this behavior, imagine a group containing three spheres, <code>s1</code>, <code>s2</code>, and <code>s3</code>.</p>
+
+<p><img src="./Bounding boxes_files/bbox-divide.png" class="medium" width="527" height="553"></p>
+
+<p>The following test implements this configuration, and invokes the <code>divide()</code> function with a threshold of <code>1</code>.</p>
+
+<pre class="code feature "><div class="pre-title">groups.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> Subdividing a group partitions its children</span>
+  <span class="k">Given</span> s1 <span class="p">←</span> <span class="nv">sphere</span><span class="o">(</span><span class="p">)</span> with<span class="p">:</span>
+      <span class="p">|</span> transform <span class="p">|</span> <span class="nv">translation</span><span class="o">(</span><span class="p">-</span><span class="mi">2</span>, <span class="p">-</span><span class="mi">2</span>, <span class="mi">0</span><span class="p">)</span> <span class="p">|</span>
+    <span class="k">And</span> s2 <span class="p">←</span> <span class="nv">sphere</span><span class="o">(</span><span class="p">)</span> with<span class="p">:</span>
+      <span class="p">|</span> transform <span class="p">|</span> <span class="nv">translation</span><span class="o">(</span><span class="p">-</span><span class="mi">2</span>, <span class="mi">2</span>, <span class="mi">0</span><span class="p">)</span> <span class="p">|</span>
+    <span class="k">And</span> s3 <span class="p">←</span> <span class="nv">sphere</span><span class="o">(</span><span class="p">)</span> with<span class="p">:</span>
+      <span class="p">|</span> transform <span class="p">|</span> <span class="nv">scaling</span><span class="o">(</span><span class="mi">4</span>, <span class="mi">4</span>, <span class="mi">4</span><span class="p">)</span> <span class="p">|</span>
+    <span class="k">And</span> g <span class="p">←</span> <span class="nv">group</span><span class="o">(</span><span class="p">)</span> of <span class="p">[</span>s1, s2, s3<span class="p">]</span>
+  <span class="k">When</span> <span class="nv">divide</span><span class="o">(</span>g, <span class="mi">1</span><span class="p">)</span>
+  <span class="k">Then</span> g<span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="p">=</span> s3
+    <span class="k">And</span> subgroup <span class="p">←</span> g<span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+    <span class="k">And</span> subgroup is a group
+    <span class="k">And</span> subgroup<span class="p">.</span>count <span class="p">=</span> <span class="mi">2</span>
+    <span class="k">And</span> subgroup<span class="p">[</span><span class="mi">0</span><span class="p">]</span> is a group of <span class="p">[</span>s1<span class="p">]</span>
+    <span class="k">And</span> subgroup<span class="p">[</span><span class="mi">1</span><span class="p">]</span> is a group of <span class="p">[</span>s2<span class="p">]</span>
+</div></pre>
+
+<p>Because the threshold is less than (or equal to) the number of <code>g</code>'s children, the children will be partitioned and sorted into subgroups when <code>divide()</code> is invoked. Then, <code>divide()</code> is invoked on each of the group's children.</p>
+
+<p>In pseudocode, the <code>divide()</code> function looks something like this:</p>
+<pre class="code pseudo "><div class="pre-content"><span class="k">function</span> <span class="nv">divide</span><span class="o">(</span><span class="n">group</span><span class="o">,</span> <span class="n">threshold</span><span class="o">)</span>
+  <span class="k">if</span> <span class="n">threshold</span> <span class="o">&lt;=</span> <span class="n">group</span><span class="o">.</span><span class="n">count</span> <span class="k">then</span>
+    <span class="o">(</span><span class="n">left</span><span class="o">,</span> <span class="n">right</span><span class="o">)</span> <span class="o">←</span> <span class="nv">partition_children</span><span class="o">(</span><span class="n">group</span><span class="o">)</span>
+    <span class="k">if</span> <span class="n">left</span> <span class="n">is</span> <span class="n">not</span> <span class="n">empty</span> <span class="k">then</span> <span class="nv">make_subgroup</span><span class="o">(</span><span class="n">group</span><span class="o">,</span> <span class="n">left</span><span class="o">)</span>
+    <span class="k">if</span> <span class="n">right</span> <span class="n">is</span> <span class="n">not</span> <span class="n">empty</span> <span class="k">then</span> <span class="nv">make_subgroup</span><span class="o">(</span><span class="n">group</span><span class="o">,</span> <span class="n">right</span><span class="o">)</span>
+  <span class="k">end</span> <span class="k">if</span>
+
+  <span class="k">for</span> <span class="n">each</span> <span class="n">child</span> <span class="n">in</span> <span class="n">group</span>
+    <span class="nv">divide</span><span class="o">(</span><span class="n">child</span><span class="o">,</span> <span class="n">threshold</span><span class="o">)</span>
+  <span class="k">end</span> <span class="k">for</span>
+<span class="k">end</span> <span class="k">function</span>
+</div></pre>
+<p>Note that even if the threshold is greater than the number of children in the group, and the group's immediate children are <em>not</em> partitioned, the <code>divide()</code> call is still propagated to the group's children.</p>
+
+<p>The following test demonstrates this case by constructing a group <code>g</code> with two children, <code>subgroup</code> and <code>s4</code>. The <code>subgroup</code> child is a group with three children, <code>s1</code>, <code>s2</code>, and <code>s3</code>.</p>
+
+<pre class="code feature "><div class="pre-title">groups.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> Subdividing a group with too few children</span>
+  <span class="k">Given</span> s1 <span class="p">←</span> <span class="nv">sphere</span><span class="o">(</span><span class="p">)</span> with<span class="p">:</span>
+      <span class="p">|</span> transform <span class="p">|</span> <span class="nv">translation</span><span class="o">(</span><span class="p">-</span><span class="mi">2</span>, <span class="mi">0</span>, <span class="mi">0</span><span class="p">)</span> <span class="p">|</span>
+    <span class="k">And</span> s2 <span class="p">←</span> <span class="nv">sphere</span><span class="o">(</span><span class="p">)</span> with<span class="p">:</span>
+      <span class="p">|</span> transform <span class="p">|</span> <span class="nv">translation</span><span class="o">(</span><span class="mi">2</span>, <span class="mi">1</span>, <span class="mi">0</span><span class="p">)</span> <span class="p">|</span>
+    <span class="k">And</span> s3 <span class="p">←</span> <span class="nv">sphere</span><span class="o">(</span><span class="p">)</span> with<span class="p">:</span>
+      <span class="p">|</span> transform <span class="p">|</span> <span class="nv">translation</span><span class="o">(</span><span class="mi">2</span>, <span class="p">-</span><span class="mi">1</span>, <span class="mi">0</span><span class="p">)</span> <span class="p">|</span>
+    <span class="k">And</span> subgroup <span class="p">←</span> <span class="nv">group</span><span class="o">(</span><span class="p">)</span> of <span class="p">[</span>s1, s2, s3<span class="p">]</span>
+    <span class="k">And</span> s4 <span class="p">←</span> <span class="nv">sphere</span><span class="o">(</span><span class="p">)</span>
+    <span class="k">And</span> g <span class="p">←</span> <span class="nv">group</span><span class="o">(</span><span class="p">)</span> of <span class="p">[</span>subgroup, s4<span class="p">]</span>
+  <span class="k">When</span> <span class="nv">divide</span><span class="o">(</span>g, <span class="mi">3</span><span class="p">)</span>
+  <span class="k">Then</span> g<span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="p">=</span> subgroup
+    <span class="k">And</span> g<span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="p">=</span> s4
+    <span class="k">And</span> subgroup<span class="p">.</span>count <span class="p">=</span> <span class="mi">2</span>
+    <span class="k">And</span> subgroup<span class="p">[</span><span class="mi">0</span><span class="p">]</span> is a group of <span class="p">[</span>s1<span class="p">]</span>
+    <span class="k">And</span> subgroup<span class="p">[</span><span class="mi">1</span><span class="p">]</span> is a group of <span class="p">[</span>s2, s3<span class="p">]</span>
+</div></pre>
+
+<p>When the group is divided, a threshold of 3 is specified, but since <code>g</code> has fewer than 3 children, nothing happens to <code>g</code> itself. Regardless, though, the <code>divide()</code> call is propagated to <code>g</code>'s children, and <code>subgroup</code> gets subdivided.</p>
+<h3>Dividing CSG shapes</h3>
+<p>There's just one more shape to which you need to add support for <code>divide()</code>: the <code>CSG</code> shape. In this case the <code>divide()</code> function does nothing to the shape itself, but, propagates the call to the shape's children.</p>
+
+<p>The following test demonstrates this with a <code>CSG</code> shape consisting of two groups, each containing two spheres. After calling <code>divide()</code> on the <code>CSG</code> shape, the <code>left</code> and <code>right</code> children will have been split into two subgroups.</p>
+
+<pre class="code feature "><div class="pre-title">csg.feature</div><div class="pre-content"><span class="k">Scenario</span><span class="p">:</span><span class="s2"> Subdividing a CSG shape subdivides its children</span>
+  <span class="k">Given</span> s1 <span class="p">←</span> <span class="nv">sphere</span><span class="o">(</span><span class="p">)</span> with<span class="p">:</span>
+      <span class="p">|</span> transform <span class="p">|</span> <span class="nv">translation</span><span class="o">(</span><span class="p">-</span><span class="mf">1.5</span>, <span class="mi">0</span>, <span class="mi">0</span><span class="p">)</span> <span class="p">|</span>
+    <span class="k">And</span> s2 <span class="p">←</span> <span class="nv">sphere</span><span class="o">(</span><span class="p">)</span> with<span class="p">:</span>
+      <span class="p">|</span> transform <span class="p">|</span> <span class="nv">translation</span><span class="o">(</span><span class="mf">1.5</span>, <span class="mi">0</span>, <span class="mi">0</span><span class="p">)</span> <span class="p">|</span>
+    <span class="k">And</span> left <span class="p">←</span> <span class="nv">group</span><span class="o">(</span><span class="p">)</span> of <span class="p">[</span>s1, s2<span class="p">]</span>
+    <span class="k">And</span> s3 <span class="p">←</span> <span class="nv">sphere</span><span class="o">(</span><span class="p">)</span> with<span class="p">:</span>
+      <span class="p">|</span> transform <span class="p">|</span> <span class="nv">translation</span><span class="o">(</span><span class="mi">0</span>, <span class="mi">0</span>, <span class="p">-</span><span class="mf">1.5</span><span class="p">)</span> <span class="p">|</span>
+    <span class="k">And</span> s4 <span class="p">←</span> <span class="nv">sphere</span><span class="o">(</span><span class="p">)</span> with<span class="p">:</span>
+      <span class="p">|</span> transform <span class="p">|</span> <span class="nv">translation</span><span class="o">(</span><span class="mi">0</span>, <span class="mi">0</span>, <span class="mf">1.5</span><span class="p">)</span> <span class="p">|</span>
+    <span class="k">And</span> right <span class="p">←</span> <span class="nv">group</span><span class="o">(</span><span class="p">)</span> of <span class="p">[</span>s3, s4<span class="p">]</span>
+    <span class="k">And</span> shape <span class="p">←</span> <span class="nv">csg</span><span class="o">(</span><span class="s2">"difference"</span>, left, right<span class="p">)</span>
+  <span class="k">When</span> <span class="nv">divide</span><span class="o">(</span>shape, <span class="mi">1</span><span class="p">)</span>
+  <span class="k">Then</span> left<span class="p">[</span><span class="mi">0</span><span class="p">]</span> is a group of <span class="p">[</span>s1<span class="p">]</span>
+    <span class="k">And</span> left<span class="p">[</span><span class="mi">1</span><span class="p">]</span> is a group of <span class="p">[</span>s2<span class="p">]</span>
+    <span class="k">And</span> right<span class="p">[</span><span class="mi">0</span><span class="p">]</span> is a group of <span class="p">[</span>s3<span class="p">]</span>
+    <span class="k">And</span> right<span class="p">[</span><span class="mi">1</span><span class="p">]</span> is a group of <span class="p">[</span>s4<span class="p">]</span>
+</div></pre>
+
+<p>And that's it! If all your tests are passing, you've just implemented a bounding volume hierarchy.</p>
+<h2>Wrapping it up</h2>
+<p>It's time to put your code to the test. Here are some ideas for you to try, to see how your renderer does now that you can build a BVH for complex scenes.</p>
+
+<ul>
+<li>Find an OBJ file online containing thousands of triangles, import it into your ray tracer, call <code>divide()</code> on it, and render away.</li>
+<li>Programmatically generate a 10x10x10 cube of spheres. Make it even bigger if you want! Put them all in a group, and <code>divide()</code> the group.</li>
+<li>Try a scene with multiple complex models in it. Design a table and put several teapots on it. How does it do?</li>
+</ul>
+
+<p>The biggest win that BVH's (or any other similar optimization) give you, though, is the freedom to experiment. Lower render times mean less waiting, and more opportunities to try new features and scenes.</p>
+
+<p>Good luck!</p>
+
+<div class="thanks">
+  <p>
+    Did you like what you read here? The book follows the same format! With
+    extensive tests and pseudocode, it will walk you through writing a ray
+    tracer of your very own, from scratch.
+    <a href="http://www.raytracerchallenge.com/#purchase">Grab your copy today!</a>
+  </p>
+
+  <a href="http://www.raytracerchallenge.com/"><img class="cover" src="./Bounding boxes_files/cover.jpg" width="450" height="540"></a>
+
+  <p>
+    If you've already purchased my book: thank you, thank you, thank you! I hope
+    you find the same satisfaction I've found in writing your own 3D renderer.
+  </p>
+
+  <p>
+    Reviews really do drive sales, though, so it would mean a lot to me if you
+    could leave a review of the book somewhere: <a href="https://www.amazon.com/Ray-Tracer-Challenge-Test-Driven-Renderer/dp/1680502719/ref=sr_1_1?ie=UTF8">Amazon.com</a>,
+    <a href="https://www.goodreads.com/book/show/39933047-the-ray-tracer-challenge">Goodreads.com</a>,
+    Twitter, Facebook, your own personal website, or any other place where folks might come across your review.
+  </p>
+
+  <p>
+    Thanks!
+  </p>
+</div>
+
+<p><img src="./Bounding boxes_files/bounding-boxes.jpg" class="full pop" width="1200" height="480"></p>
+
+<p>Each dragon in this scene consists of more than 24k triangles. Times six dragons, that comes out to more than 140k triangles in the scene. It really is not feasible to render without bounding boxes (or some similar optimization). Once you've implemented bounding boxes and BVH's, give the scene a try with your renderer!</p>
+
+<p>You'll need the following dragon model, as well:</p>
+
+<p><a href="http://www.raytracerchallenge.com/bonus/assets/dragon.zip">dragon.zip</a> (607KB)</p>
+
+<pre class="code yml "><div class="pre-title">bounding-boxes.yml</div><div class="pre-content"><span class="c1"># ======================================================</span>
+<span class="c1"># bounding-boxes.yml</span>
+<span class="c1">#</span>
+<span class="c1"># This file describes the banner image for the "Bounding</span>
+<span class="c1"># boxes and hierarches" bonus chapter, at</span>
+<span class="c1">#</span>
+<span class="c1"># http://www.raytracerchallenge.com/bonus/bounding-boxes.html</span>
+<span class="c1">#</span>
+<span class="c1"># by Jamis Buck &lt;jamis@jamisbuck.org&gt;</span>
+<span class="c1"># ======================================================</span>
+
+<span class="c1"># ======================================================</span>
+<span class="c1"># the camera</span>
+<span class="c1"># ======================================================</span>
+
+<span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">camera</span>
+  <span class="na">width</span><span class="pi">:</span> <span class="s">500</span>
+  <span class="na">height</span><span class="pi">:</span> <span class="s">200</span>
+  <span class="na">field-of-view</span><span class="pi">:</span> <span class="s">1.2</span>
+  <span class="na">from</span><span class="pi">:</span> <span class="pi">[</span><span class="nv">0</span><span class="pi">,</span> <span class="nv">2.5</span><span class="pi">,</span> <span class="nv">-10</span><span class="pi">]</span>
+  <span class="na">to</span><span class="pi">:</span> <span class="pi">[</span><span class="nv">0</span><span class="pi">,</span> <span class="nv">1</span><span class="pi">,</span> <span class="nv">0</span><span class="pi">]</span>
+  <span class="na">up</span><span class="pi">:</span> <span class="pi">[</span><span class="nv">0</span><span class="pi">,</span> <span class="nv">1</span><span class="pi">,</span> <span class="nv">0</span><span class="pi">]</span>
+
+<span class="c1"># ======================================================</span>
+<span class="c1"># lights</span>
+<span class="c1"># ======================================================</span>
+
+<span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">light</span>
+  <span class="na">at</span><span class="pi">:</span> <span class="pi">[</span><span class="nv">-10</span><span class="pi">,</span> <span class="nv">100</span><span class="pi">,</span> <span class="nv">-100</span><span class="pi">]</span>
+  <span class="na">intensity</span><span class="pi">:</span> <span class="pi">[</span><span class="nv">1</span><span class="pi">,</span> <span class="nv">1</span><span class="pi">,</span> <span class="nv">1</span><span class="pi">]</span>
+
+<span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">light</span>
+  <span class="na">at</span><span class="pi">:</span> <span class="pi">[</span><span class="nv">0</span><span class="pi">,</span> <span class="nv">100</span><span class="pi">,</span> <span class="nv">0</span><span class="pi">]</span>
+  <span class="na">intensity</span><span class="pi">:</span> <span class="pi">[</span><span class="nv">0.1</span><span class="pi">,</span> <span class="nv">0.1</span><span class="pi">,</span> <span class="nv">0.1</span><span class="pi">]</span>
+
+<span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">light</span>
+  <span class="na">at</span><span class="pi">:</span> <span class="pi">[</span><span class="nv">100</span><span class="pi">,</span> <span class="nv">10</span><span class="pi">,</span> <span class="nv">-25</span><span class="pi">]</span>
+  <span class="na">intensity</span><span class="pi">:</span> <span class="pi">[</span><span class="nv">0.2</span><span class="pi">,</span> <span class="nv">0.2</span><span class="pi">,</span> <span class="nv">0.2</span><span class="pi">]</span>
+
+<span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">light</span>
+  <span class="na">at</span><span class="pi">:</span> <span class="pi">[</span><span class="nv">-100</span><span class="pi">,</span> <span class="nv">10</span><span class="pi">,</span> <span class="nv">-25</span><span class="pi">]</span>
+  <span class="na">intensity</span><span class="pi">:</span> <span class="pi">[</span><span class="nv">0.2</span><span class="pi">,</span> <span class="nv">0.2</span><span class="pi">,</span> <span class="nv">0.2</span><span class="pi">]</span>
+
+<span class="c1"># ======================================================</span>
+<span class="c1"># definitions</span>
+<span class="c1"># ======================================================</span>
+
+<span class="pi">-</span> <span class="na">define</span><span class="pi">:</span> <span class="s">raw-bbox</span>
+  <span class="na">value</span><span class="pi">:</span>
+    <span class="na">add</span><span class="pi">:</span> <span class="s">cube</span>
+    <span class="na">shadow</span><span class="pi">:</span> <span class="no">false</span>
+    <span class="na">transform</span><span class="pi">:</span>
+      <span class="pi">-</span> <span class="pi">[</span> <span class="nv">translate</span><span class="pi">,</span> <span class="nv">1</span><span class="pi">,</span> <span class="nv">1</span><span class="pi">,</span> <span class="nv">1</span> <span class="pi">]</span>
+      <span class="pi">-</span> <span class="pi">[</span> <span class="nv">scale</span><span class="pi">,</span> <span class="nv">3.73335</span><span class="pi">,</span> <span class="nv">2.5845</span><span class="pi">,</span> <span class="nv">1.6283</span> <span class="pi">]</span>
+      <span class="pi">-</span> <span class="pi">[</span> <span class="nv">translate</span><span class="pi">,</span> <span class="nv">-3.9863</span><span class="pi">,</span> <span class="nv">-0.1217</span><span class="pi">,</span> <span class="nv">-1.1820</span> <span class="pi">]</span>
+
+<span class="pi">-</span> <span class="na">define</span><span class="pi">:</span> <span class="s">dragon</span>
+  <span class="na">value</span><span class="pi">:</span>
+    <span class="na">add</span><span class="pi">:</span> <span class="s">obj</span>
+    <span class="na">file</span><span class="pi">:</span> <span class="s">dragon.obj</span>
+    <span class="na">transform</span><span class="pi">:</span>
+      <span class="pi">-</span> <span class="pi">[</span> <span class="nv">translate</span><span class="pi">,</span> <span class="nv">0</span><span class="pi">,</span> <span class="nv">0.1217</span><span class="pi">,</span> <span class="nv">0</span><span class="pi">]</span>
+      <span class="pi">-</span> <span class="pi">[</span> <span class="nv">scale</span><span class="pi">,</span> <span class="nv">0.268</span><span class="pi">,</span> <span class="nv">0.268</span><span class="pi">,</span> <span class="nv">0.268</span> <span class="pi">]</span>
+
+<span class="pi">-</span> <span class="na">define</span><span class="pi">:</span> <span class="s">bbox</span>
+  <span class="na">value</span><span class="pi">:</span>
+    <span class="na">add</span><span class="pi">:</span> <span class="s">raw-bbox</span>
+    <span class="na">transform</span><span class="pi">:</span>
+      <span class="pi">-</span> <span class="pi">[</span> <span class="nv">translate</span><span class="pi">,</span> <span class="nv">0</span><span class="pi">,</span> <span class="nv">0.1217</span><span class="pi">,</span> <span class="nv">0</span><span class="pi">]</span>
+      <span class="pi">-</span> <span class="pi">[</span> <span class="nv">scale</span><span class="pi">,</span> <span class="nv">0.268</span><span class="pi">,</span> <span class="nv">0.268</span><span class="pi">,</span> <span class="nv">0.268</span> <span class="pi">]</span>
+
+<span class="pi">-</span> <span class="na">define</span><span class="pi">:</span> <span class="s">pedestal</span>
+  <span class="na">value</span><span class="pi">:</span>
+    <span class="na">add</span><span class="pi">:</span> <span class="s">cylinder</span>
+    <span class="na">min</span><span class="pi">:</span> <span class="s">-0.15</span>
+    <span class="na">max</span><span class="pi">:</span> <span class="s">0</span>
+    <span class="na">closed</span><span class="pi">:</span> <span class="no">true</span>
+    <span class="na">material</span><span class="pi">:</span>
+      <span class="na">color</span><span class="pi">:</span> <span class="pi">[</span> <span class="nv">0.2</span><span class="pi">,</span> <span class="nv">0.2</span><span class="pi">,</span> <span class="nv">0.2</span> <span class="pi">]</span>
+      <span class="na">ambient</span><span class="pi">:</span> <span class="s">0</span>
+      <span class="na">diffuse</span><span class="pi">:</span> <span class="s">0.8</span>
+      <span class="na">specular</span><span class="pi">:</span> <span class="s">0</span>
+      <span class="na">reflective</span><span class="pi">:</span> <span class="s">0.2</span>
+
+<span class="c1"># ======================================================</span>
+<span class="c1"># scene</span>
+<span class="c1"># ======================================================</span>
+
+<span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">group</span>
+  <span class="na">transform</span><span class="pi">:</span>
+    <span class="pi">-</span> <span class="pi">[</span> <span class="nv">translate</span><span class="pi">,</span> <span class="nv">0</span><span class="pi">,</span> <span class="nv">2</span><span class="pi">,</span> <span class="nv">0</span> <span class="pi">]</span>
+  <span class="na">children</span><span class="pi">:</span>
+    <span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">pedestal</span>
+    <span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">group</span>
+      <span class="na">children</span><span class="pi">:</span>
+        <span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">dragon</span>
+          <span class="na">material</span><span class="pi">:</span>
+            <span class="na">color</span><span class="pi">:</span> <span class="pi">[</span> <span class="nv">1</span><span class="pi">,</span> <span class="nv">0</span><span class="pi">,</span> <span class="nv">0.1</span> <span class="pi">]</span>
+            <span class="na">ambient</span><span class="pi">:</span> <span class="s">0.1</span>
+            <span class="na">diffuse</span><span class="pi">:</span> <span class="s">0.6</span>
+            <span class="na">specular</span><span class="pi">:</span> <span class="s">0.3</span>
+            <span class="na">shininess</span><span class="pi">:</span> <span class="s">15</span>
+        <span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">bbox</span>
+          <span class="na">material</span><span class="pi">:</span>
+            <span class="na">ambient</span><span class="pi">:</span> <span class="s">0</span>
+            <span class="na">diffuse</span><span class="pi">:</span> <span class="s">0.4</span>
+            <span class="na">specular</span><span class="pi">:</span> <span class="s">0</span>
+            <span class="na">transparency</span><span class="pi">:</span> <span class="s">0.6</span>
+            <span class="na">refractive-index</span><span class="pi">:</span> <span class="s">1</span>
+
+<span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">group</span>
+  <span class="na">transform</span><span class="pi">:</span>
+    <span class="pi">-</span> <span class="pi">[</span> <span class="nv">translate</span><span class="pi">,</span> <span class="nv">2</span><span class="pi">,</span> <span class="nv">1</span><span class="pi">,</span> <span class="nv">-1</span> <span class="pi">]</span>
+  <span class="na">children</span><span class="pi">:</span>
+    <span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">pedestal</span>
+    <span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">group</span>
+      <span class="na">transform</span><span class="pi">:</span>
+        <span class="pi">-</span> <span class="pi">[</span> <span class="nv">rotate-y</span><span class="pi">,</span> <span class="nv">4</span> <span class="pi">]</span>
+        <span class="pi">-</span> <span class="pi">[</span> <span class="nv">scale</span><span class="pi">,</span> <span class="nv">0.75</span><span class="pi">,</span> <span class="nv">0.75</span><span class="pi">,</span> <span class="nv">0.75</span> <span class="pi">]</span>
+      <span class="na">children</span><span class="pi">:</span>
+        <span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">dragon</span>
+          <span class="na">material</span><span class="pi">:</span>
+            <span class="na">color</span><span class="pi">:</span> <span class="pi">[</span> <span class="nv">1</span><span class="pi">,</span> <span class="nv">0.5</span><span class="pi">,</span> <span class="nv">0.1</span> <span class="pi">]</span>
+            <span class="na">ambient</span><span class="pi">:</span> <span class="s">0.1</span>
+            <span class="na">diffuse</span><span class="pi">:</span> <span class="s">0.6</span>
+            <span class="na">specular</span><span class="pi">:</span> <span class="s">0.3</span>
+            <span class="na">shininess</span><span class="pi">:</span> <span class="s">15</span>
+        <span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">bbox</span>
+          <span class="na">material</span><span class="pi">:</span>
+            <span class="na">ambient</span><span class="pi">:</span> <span class="s">0</span>
+            <span class="na">diffuse</span><span class="pi">:</span> <span class="s">0.2</span>
+            <span class="na">specular</span><span class="pi">:</span> <span class="s">0</span>
+            <span class="na">transparency</span><span class="pi">:</span> <span class="s">0.8</span>
+            <span class="na">refractive-index</span><span class="pi">:</span> <span class="s">1</span>
+
+<span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">group</span>
+  <span class="na">transform</span><span class="pi">:</span>
+    <span class="pi">-</span> <span class="pi">[</span> <span class="nv">translate</span><span class="pi">,</span> <span class="nv">-2</span><span class="pi">,</span> <span class="nv">.75</span><span class="pi">,</span> <span class="nv">-1</span> <span class="pi">]</span>
+  <span class="na">children</span><span class="pi">:</span>
+    <span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">pedestal</span>
+    <span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">group</span>
+      <span class="na">transform</span><span class="pi">:</span>
+        <span class="pi">-</span> <span class="pi">[</span> <span class="nv">rotate-y</span><span class="pi">,</span> <span class="nv">-0.4</span> <span class="pi">]</span>
+        <span class="pi">-</span> <span class="pi">[</span> <span class="nv">scale</span><span class="pi">,</span> <span class="nv">0.75</span><span class="pi">,</span> <span class="nv">0.75</span><span class="pi">,</span> <span class="nv">0.75</span> <span class="pi">]</span>
+      <span class="na">children</span><span class="pi">:</span>
+        <span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">dragon</span>
+          <span class="na">material</span><span class="pi">:</span>
+            <span class="na">color</span><span class="pi">:</span> <span class="pi">[</span> <span class="nv">0.9</span><span class="pi">,</span> <span class="nv">0.5</span><span class="pi">,</span> <span class="nv">0.1</span> <span class="pi">]</span>
+            <span class="na">ambient</span><span class="pi">:</span> <span class="s">0.1</span>
+            <span class="na">diffuse</span><span class="pi">:</span> <span class="s">0.6</span>
+            <span class="na">specular</span><span class="pi">:</span> <span class="s">0.3</span>
+            <span class="na">shininess</span><span class="pi">:</span> <span class="s">15</span>
+        <span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">bbox</span>
+          <span class="na">material</span><span class="pi">:</span>
+            <span class="na">ambient</span><span class="pi">:</span> <span class="s">0</span>
+            <span class="na">diffuse</span><span class="pi">:</span> <span class="s">0.2</span>
+            <span class="na">specular</span><span class="pi">:</span> <span class="s">0</span>
+            <span class="na">transparency</span><span class="pi">:</span> <span class="s">0.8</span>
+            <span class="na">refractive-index</span><span class="pi">:</span> <span class="s">1</span>
+
+<span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">group</span>
+  <span class="na">transform</span><span class="pi">:</span>
+    <span class="pi">-</span> <span class="pi">[</span> <span class="nv">translate</span><span class="pi">,</span> <span class="nv">-4</span><span class="pi">,</span> <span class="nv">0</span><span class="pi">,</span> <span class="nv">-2</span> <span class="pi">]</span>
+  <span class="na">children</span><span class="pi">:</span>
+    <span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">pedestal</span>
+    <span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">group</span>
+      <span class="na">transform</span><span class="pi">:</span>
+        <span class="pi">-</span> <span class="pi">[</span> <span class="nv">rotate-y</span><span class="pi">,</span> <span class="nv">-0.2</span> <span class="pi">]</span>
+        <span class="pi">-</span> <span class="pi">[</span> <span class="nv">scale</span><span class="pi">,</span> <span class="nv">0.5</span><span class="pi">,</span> <span class="nv">0.5</span><span class="pi">,</span> <span class="nv">0.5</span> <span class="pi">]</span>
+      <span class="na">children</span><span class="pi">:</span>
+        <span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">dragon</span>
+          <span class="na">material</span><span class="pi">:</span>
+            <span class="na">color</span><span class="pi">:</span> <span class="pi">[</span> <span class="nv">1</span><span class="pi">,</span> <span class="nv">0.9</span><span class="pi">,</span> <span class="nv">0.1</span> <span class="pi">]</span>
+            <span class="na">ambient</span><span class="pi">:</span> <span class="s">0.1</span>
+            <span class="na">diffuse</span><span class="pi">:</span> <span class="s">0.6</span>
+            <span class="na">specular</span><span class="pi">:</span> <span class="s">0.3</span>
+            <span class="na">shininess</span><span class="pi">:</span> <span class="s">15</span>
+        <span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">bbox</span>
+          <span class="na">material</span><span class="pi">:</span>
+            <span class="na">ambient</span><span class="pi">:</span> <span class="s">0</span>
+            <span class="na">diffuse</span><span class="pi">:</span> <span class="s">0.1</span>
+            <span class="na">specular</span><span class="pi">:</span> <span class="s">0</span>
+            <span class="na">transparency</span><span class="pi">:</span> <span class="s">0.9</span>
+            <span class="na">refractive-index</span><span class="pi">:</span> <span class="s">1</span>
+
+<span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">group</span>
+  <span class="na">transform</span><span class="pi">:</span>
+    <span class="pi">-</span> <span class="pi">[</span> <span class="nv">translate</span><span class="pi">,</span> <span class="nv">4</span><span class="pi">,</span> <span class="nv">0</span><span class="pi">,</span> <span class="nv">-2</span> <span class="pi">]</span>
+  <span class="na">children</span><span class="pi">:</span>
+    <span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">pedestal</span>
+    <span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">group</span>
+      <span class="na">transform</span><span class="pi">:</span>
+        <span class="pi">-</span> <span class="pi">[</span> <span class="nv">rotate-y</span><span class="pi">,</span> <span class="nv">3.3</span> <span class="pi">]</span>
+        <span class="pi">-</span> <span class="pi">[</span> <span class="nv">scale</span><span class="pi">,</span> <span class="nv">0.5</span><span class="pi">,</span> <span class="nv">0.5</span><span class="pi">,</span> <span class="nv">0.5</span> <span class="pi">]</span>
+      <span class="na">children</span><span class="pi">:</span>
+        <span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">dragon</span>
+          <span class="na">material</span><span class="pi">:</span>
+            <span class="na">color</span><span class="pi">:</span> <span class="pi">[</span> <span class="nv">0.9</span><span class="pi">,</span> <span class="nv">1</span><span class="pi">,</span> <span class="nv">0.1</span> <span class="pi">]</span>
+            <span class="na">ambient</span><span class="pi">:</span> <span class="s">0.1</span>
+            <span class="na">diffuse</span><span class="pi">:</span> <span class="s">0.6</span>
+            <span class="na">specular</span><span class="pi">:</span> <span class="s">0.3</span>
+            <span class="na">shininess</span><span class="pi">:</span> <span class="s">15</span>
+        <span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">bbox</span>
+          <span class="na">material</span><span class="pi">:</span>
+            <span class="na">ambient</span><span class="pi">:</span> <span class="s">0</span>
+            <span class="na">diffuse</span><span class="pi">:</span> <span class="s">0.1</span>
+            <span class="na">specular</span><span class="pi">:</span> <span class="s">0</span>
+            <span class="na">transparency</span><span class="pi">:</span> <span class="s">0.9</span>
+            <span class="na">refractive-index</span><span class="pi">:</span> <span class="s">1</span>
+
+<span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">group</span>
+  <span class="na">transform</span><span class="pi">:</span>
+    <span class="pi">-</span> <span class="pi">[</span> <span class="nv">translate</span><span class="pi">,</span> <span class="nv">0</span><span class="pi">,</span> <span class="nv">0.5</span><span class="pi">,</span> <span class="nv">-4</span> <span class="pi">]</span>
+  <span class="na">children</span><span class="pi">:</span>
+    <span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">pedestal</span>
+    <span class="pi">-</span> <span class="na">add</span><span class="pi">:</span> <span class="s">dragon</span>
+      <span class="na">material</span><span class="pi">:</span>
+        <span class="na">color</span><span class="pi">:</span> <span class="pi">[</span> <span class="nv">1</span><span class="pi">,</span> <span class="nv">1</span><span class="pi">,</span> <span class="nv">1</span> <span class="pi">]</span>
+        <span class="na">ambient</span><span class="pi">:</span> <span class="s">0.1</span>
+        <span class="na">diffuse</span><span class="pi">:</span> <span class="s">0.6</span>
+        <span class="na">specular</span><span class="pi">:</span> <span class="s">0.3</span>
+        <span class="na">shininess</span><span class="pi">:</span> <span class="s">15</span>
+      <span class="na">transform</span><span class="pi">:</span>
+        <span class="pi">-</span> <span class="pi">[</span> <span class="nv">rotate-y</span><span class="pi">,</span> <span class="nv">3.1415</span> <span class="pi">]</span>
+</div></pre>
+
+    </div>
+  
+
+</body></html>
